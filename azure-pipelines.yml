@@ -45,6 +45,7 @@ jobs:
       command: 'test'
       projects: '**/*Tests.csproj'
       arguments: '--configuration Release'
+      
   - powershell: |
       $backupDir = "D:\Backup"
       $backupFile = "$(Build.ArtifactStagingDirectory)\$(Build.BuildId)_AzDevOpsBackup.zip"
