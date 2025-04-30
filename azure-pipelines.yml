@@ -7,7 +7,7 @@ trigger:
 - master
 
 pool:
-  vmImage: test pipeline
+  vmImage: 'test pipeline'
 
 variables:
   solution: '**/*.sln'
