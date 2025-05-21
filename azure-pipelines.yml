@@ -7,7 +7,7 @@ trigger:
 - master
 
 pool:
-  name: 'test pipeline'
+  name: 'test pipeline v2'
 
 variables:
   solution: '**/*.sln'
@@ -30,5 +30,7 @@ steps:
 
 - task: VSTest@2
   inputs:
+    testSelector: 'testAssemblies'
+    testAssembly: '**\*test*.dll'
     platform: '$(buildPlatform)'
     configuration: '$(buildConfiguration)'
