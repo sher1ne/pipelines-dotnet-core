@@ -1,26 +1,28 @@
-# ASP.NET Core (.NET Framework)
-# Build and test ASP.NET Core projects targeting the full .NET Framework.
-# Add steps that publish symbols, save build artifacts, and more:
-# https://docs.microsoft.com/azure/devops/pipelines/languages/dotnet-core
-
 trigger:
 - master
 
 pool:
-  name: 'test pipeline v2'
+  name: 'test pipeline'
 
 variables:
   solution: '**/*.sln'
   buildPlatform: 'Any CPU'
   buildConfiguration: 'Release'
+  packageOutputPath: '$(Build.ArtifactStagingDirectory)/nuget'
 
 steps:
+# Nous installons L'outil NuGet
 - task: NuGetToolInstaller@1
 
+# Restaurer les dépendances depuis Azure Artifacts
 - task: NuGetCommand@2
   inputs:
+    command: 'restore'
     restoreSolution: '$(solution)'
+    feedsToUse: 'select'
+    vstsFeed: '<project-id>/<feed-id>'  # à remplacer plus tard
 
+# Build du projet
 - task: VSBuild@1
   inputs:
     solution: '$(solution)'
@@ -28,9 +30,24 @@ steps:
     platform: '$(buildPlatform)'
     configuration: '$(buildConfiguration)'
 
+# Tests
 - task: VSTest@2
   inputs:
-    testSelector: 'testAssemblies'
-    testAssembly: '**\*test*.dll'
     platform: '$(buildPlatform)'
     configuration: '$(buildConfiguration)'
+
+# Packager le projet en .nupkg
+- task: NuGetCommand@2
+  inputs:
+    command: 'pack'
+    packagesToPack: '**/*.csproj'
+    configuration: '$(buildConfiguration)'
+    packDestination: '$(packageOutputPath)'
+
+# Publier le package sur Azure Artifacts
+- task: NuGetCommand@2
+  inputs:
+    command: 'push'
+    packagesToPush: '$(packageOutputPath)/*.nupkg'
+    publishVstsFeed: '<project-id>/<feed-id>'  # à remplacer encore
+
