@@ -12,6 +12,7 @@ namespace pipelines_dotnet_core.Controllers
     {
         public IActionResult Index()
         {
+            ViewBag.Message = "Bienvenue depuis la branche test-homecontroller";
             return View();
         }
 
