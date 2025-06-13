@@ -5,7 +5,7 @@ param environmentName string
 param location string = resourceGroup().location
 
 // Simple storage account for testing
-resource storageAccount 'Microsoft.Storage/storagetest' = {
+resource storageAccount 'Microsoft.Storage/storageAccounts@2023-01-01' = {
   name: 'store${environmentName}${uniqueString(resourceGroup().id)}'
   location: location
   sku: {
