@@ -149,7 +149,7 @@ stages:
                       --template-file bicep/main.bicep \
                       --parameters environmentName=$(ENV_NAME) \
                       --parameters location="$(location)" \
-                      --verbose
+                      --verbose --debug
                     
                     DEPLOYMENT_STATUS=$?
                     
