@@ -53,7 +53,7 @@ parameters:
 variables:
 - group: 'environment-secrets'
 - name: subscriptionServiceConnection
-  value: 'azure-service-connection-v2'  # UPDATE THIS TO MATCH YOUR SERVICE CONNECTION NAME
+  value: 'azure-service-connection-v2'
 - name: location
   value: 'East US'
 
