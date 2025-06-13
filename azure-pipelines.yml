@@ -58,7 +58,7 @@ parameters:
 variables:
 - group: 'environment-secrets'
 - name: subscriptionServiceConnection
-  value: 'azure-service-connection'
+  value: 'azure-service-connection-v2'
 - name: location
   value: 'East US'
 
