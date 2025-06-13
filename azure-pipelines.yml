@@ -6,6 +6,16 @@
 trigger:
 - master
 
+parameters:
+- name: operation
+  displayName: 'Operation Type'
+  type: string
+  default: 'promote'
+  values:
+  - promote
+  - create_new
+  - destroy
+
 pool:
   vmImage: ubuntu-latest
 
