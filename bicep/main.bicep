@@ -5,14 +5,14 @@ param environmentName string
 param location string = resourceGroup().location
 
 @description('App Service Plan SKU')
-@allowed(['F1', 'B1', 'B2', 'S1', 'S2', 'P1v3', 'P2v3'])
-param appServicePlanSku string = 'F1'
+@allowed(['B1', 'B2', 'S1', 'S2', 'P1v3', 'P2v3'])
+param appServicePlanSku string = 'B1'
 
-// Variables for consistent naming
+// Variables for consistent naming - fix storage account name issues
+var cleanEnvName = toLower(replace(environmentName, '-', ''))
 var appName = 'app-${environmentName}-${uniqueString(resourceGroup().id)}'
 var appServicePlanName = 'asp-${environmentName}-${uniqueString(resourceGroup().id)}'
-var cleanEnvName = toLower(replace(environmentName, '-', ''))
-var storageAccountName = 'st${environmentName}${uniqueString(resourceGroup().id)}'
+var storageAccountName = take('st${cleanEnvName}${uniqueString(resourceGroup().id)}', 24)
 var appInsightsName = 'ai-${cleanEnvName}-${uniqueString(resourceGroup().id)}'
 
 // Storage Account
@@ -49,13 +49,13 @@ resource appInsights 'Microsoft.Insights/components@2020-02-02' = {
   }
 }
 
-// App Service Plan
+// App Service Plan - Using B1 instead of F1 to avoid quota issues
 resource appServicePlan 'Microsoft.Web/serverfarms@2023-01-01' = {
   name: appServicePlanName
   location: location
   sku: {
     name: appServicePlanSku
-    tier: appServicePlanSku == 'F1' ? 'Free' : 'Basic'
+    tier: 'Basic'
   }
   kind: 'app'
   properties: {
@@ -92,7 +92,7 @@ resource webApp 'Microsoft.Web/sites@2023-01-01' = {
           value: 'DefaultEndpointsProtocol=https;AccountName=${storageAccount.name};AccountKey=${storageAccount.listKeys().keys[0].value};EndpointSuffix=core.windows.net'
         }
       ]
-      alwaysOn: appServicePlanSku != 'F1'
+      alwaysOn: true
       ftpsState: 'Disabled'
       minTlsVersion: '1.2'
     }
@@ -102,6 +102,11 @@ resource webApp 'Microsoft.Web/sites@2023-01-01' = {
     Environment: environmentName
     Project: 'MyApp'
   }
+  dependsOn: [
+    appServicePlan
+    appInsights
+    storageAccount
+  ]
 }
 
 // Storage Container
@@ -110,9 +115,6 @@ resource blobContainer 'Microsoft.Storage/storageAccounts/blobServices/container
   properties: {
     publicAccess: 'None'
   }
-  dependsOn: [
-    storageAccount
-  ]
 }
 
 // Outputs
