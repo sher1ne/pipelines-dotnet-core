@@ -4,16 +4,381 @@
 # https://aka.ms/yaml
 
 trigger:
-- master
+- none
+parameters:
+- name: operation
+  displayName: 'Operation Type'
+  type: string
+  default: 'promote'
+  values:
+  - promote
+  - create_new
+  - destroy
+
+- name: sourceEnvironment
+  displayName: 'Source Environment (for promotion)'
+  type: string
+  default: 'dev'
+  values:
+  - dev
+  - uat
+  - staging
+  - prod
+
+- name: targetEnvironment
+  displayName: 'Target Environment'
+  type: string
+  default: 'staging'
+  values:
+  - dev
+  - uat
+  - staging
+  - prod
+  - feature-branch
+
+- name: newEnvironmentName
+  displayName: 'New Environment Name (for new environments)'
+  type: string
+  default: ''
+
+- name: resourceGroupName
+  displayName: 'Resource Group Name'
+  type: string
+  default: 'rg-myapp'
+  
+- name: infrastructureMethod
+  displayName: 'Infrastructure Method'
+  type: string
+  default: 'bicep'
+  values:
+  - bicep
+  - azure_cli
+  - arm_template
+
+variables:
+- group: 'environment-secrets'
+- name: subscriptionServiceConnection
+  value: 'azure-service-connection'
+- name: location
+  value: 'East US'
 
 pool:
-  vmImage: ubuntu-latest
+  vmImage: 'ubuntu-latest'
 
-steps:
-- script: echo Hello, world!
-  displayName: 'Run a one-line script'
+stages:
+- stage: Validate
+  displayName: 'Validate Parameters'
+  jobs:
+  - job: ValidateInputs
+    displayName: 'Validate Pipeline Inputs'
+    steps:
+    - script: |
+        echo "Operation: ${{ parameters.operation }}"
+        echo "Infrastructure Method: ${{ parameters.infrastructureMethod }}"
+        
+        # Validate new environment name if creating new
+        if [ "${{ parameters.operation }}" = "create_new" ] && [ -z "${{ parameters.newEnvironmentName }}" ]; then
+          echo "##vso[task.logissue type=error]New environment name is required when creating a new environment"
+          exit 1
+        fi
+        
+        # Validate promotion parameters
+        if [ "${{ parameters.operation }}" = "promote" ] && [ "${{ parameters.sourceEnvironment }}" = "${{ parameters.targetEnvironment }}" ]; then
+          echo "##vso[task.logissue type=error]Source and target environments cannot be the same"
+          exit 1
+        fi
+      displayName: 'Validate Parameters'
 
-- script: |
-    echo Add other tasks to build, test, and deploy your project.
-    echo See https://aka.ms/yaml
-  displayName: 'Run a multi-line script'
+- stage: Infrastructure
+  displayName: 'Infrastructure Management'
+  dependsOn: Validate
+  condition: succeeded()
+  jobs:
+  - deployment: ManageInfrastructure
+    displayName: 'Manage Infrastructure'
+    environment: ${{ parameters.targetEnvironment }}
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - checkout: self
+          
+          # Set environment variables
+          - script: |
+              # Set environment name
+              if [ "${{ parameters.operation }}" = "create_new" ]; then
+                ENV_NAME="${{ parameters.newEnvironmentName }}"
+              else
+                ENV_NAME="${{ parameters.targetEnvironment }}"
+              fi
+              echo "##vso[task.setvariable variable=ENV_NAME]$ENV_NAME"
+              echo "##vso[task.setvariable variable=RESOURCE_GROUP_NAME]${{ parameters.resourceGroupName }}-$ENV_NAME"
+            displayName: 'Set Environment Variables'
+          
+          # Option 1: Using Bicep
+          - ${{ if eq(parameters.infrastructureMethod, 'bicep') }}:
+            - task: AzureCLI@2
+              displayName: 'Deploy Infrastructure with Bicep'
+              inputs:
+                azureSubscription: $(subscriptionServiceConnection)
+                scriptType: 'bash'
+                scriptLocation: 'inlineScript'
+                inlineScript: |
+                  if [ "${{ parameters.operation }}" = "destroy" ]; then
+                    echo "Deleting resource group: $(RESOURCE_GROUP_NAME)"
+                    az group delete --name $(RESOURCE_GROUP_NAME) --yes --no-wait
+                  else
+                    echo "Deploying infrastructure to: $(RESOURCE_GROUP_NAME)"
+                    
+                    # Create resource group if it doesn't exist
+                    az group create --name $(RESOURCE_GROUP_NAME) --location "$(location)"
+                    
+                    # Deploy Bicep template
+                    az deployment group create \
+                      --resource-group $(RESOURCE_GROUP_NAME) \
+                      --template-file bicep/main.bicep \
+                      --parameters environmentName=$(ENV_NAME) \
+                      --parameters location="$(location)"
+                      
+                    # Get outputs
+                    APP_URL=$(az deployment group show \
+                      --resource-group $(RESOURCE_GROUP_NAME) \
+                      --name main \
+                      --query properties.outputs.appServiceUrl.value -o tsv)
+                    
+                    echo "##vso[task.setvariable variable=APP_URL]$APP_URL"
+                    echo "Application URL: $APP_URL"
+                  fi
+          
+          # Option 2: Using Azure CLI directly
+          - ${{ if eq(parameters.infrastructureMethod, 'azure_cli') }}:
+            - task: AzureCLI@2
+              displayName: 'Deploy Infrastructure with Azure CLI'
+              inputs:
+                azureSubscription: $(subscriptionServiceConnection)
+                scriptType: 'bash'
+                scriptLocation: 'inlineScript'
+                inlineScript: |
+                  if [ "${{ parameters.operation }}" = "destroy" ]; then
+                    echo "Deleting resource group: $(RESOURCE_GROUP_NAME)"
+                    az group delete --name $(RESOURCE_GROUP_NAME) --yes --no-wait
+                  else
+                    echo "Creating infrastructure with Azure CLI"
+                    
+                    # Create resource group
+                    az group create --name $(RESOURCE_GROUP_NAME) --location "$(location)"
+                    
+                    # Create App Service Plan
+                    az appservice plan create \
+                      --name "asp-$(ENV_NAME)" \
+                      --resource-group $(RESOURCE_GROUP_NAME) \
+                      --sku B1 \
+                      --is-linux
+                    
+                    # Create Web App
+                    az webapp create \
+                      --name "myapp-$(ENV_NAME)" \
+                      --resource-group $(RESOURCE_GROUP_NAME) \
+                      --plan "asp-$(ENV_NAME)" \
+                      --runtime "NODE:18-lts"
+                    
+                    # Optional: Create database
+                    # az sql server create \
+                    #   --name "sql-$(ENV_NAME)" \
+                    #   --resource-group $(RESOURCE_GROUP_NAME) \
+                    #   --location "$(location)" \
+                    #   --admin-user sqladmin \
+                    #   --admin-password "$(SQL_ADMIN_PASSWORD)"
+                    
+                    # Get app URL
+                    APP_URL=$(az webapp show --name "myapp-$(ENV_NAME)" --resource-group $(RESOURCE_GROUP_NAME) --query defaultHostName -o tsv)
+                    echo "##vso[task.setvariable variable=APP_URL]https://$APP_URL"
+                    echo "Application URL: https://$APP_URL"
+                  fi
+          
+          # Option 3: Using ARM Template
+          - ${{ if eq(parameters.infrastructureMethod, 'arm_template') }}:
+            - task: AzureResourceManagerTemplateDeployment@3
+              displayName: 'Deploy ARM Template'
+              condition: ne('${{ parameters.operation }}', 'destroy')
+              inputs:
+                deploymentScope: 'Resource Group'
+                azureResourceManagerConnection: $(subscriptionServiceConnection)
+                action: 'Create Or Update Resource Group'
+                resourceGroupName: $(RESOURCE_GROUP_NAME)
+                location: $(location)
+                templateLocation: 'Linked artifact'
+                codeArtifactLocation: 'arm-templates/azuredeploy.json'
+                parametersLocation: 'Linked artifact'
+                codeParametersLocation: 'arm-templates/azuredeploy.parameters.json'
+                overrideParameters: '-environmentName $(ENV_NAME)'
+                deploymentMode: 'Incremental'
+            
+            - task: AzureCLI@2
+              displayName: 'Delete Resources (ARM)'
+              condition: eq('${{ parameters.operation }}', 'destroy')
+              inputs:
+                azureSubscription: $(subscriptionServiceConnection)
+                scriptType: 'bash'
+                scriptLocation: 'inlineScript'
+                inlineScript: |
+                  az group delete --name $(RESOURCE_GROUP_NAME) --yes --no-wait
+
+- stage: Application
+  displayName: 'Application Deployment'
+  dependsOn: Infrastructure
+  condition: and(succeeded(), ne('${{ parameters.operation }}', 'destroy'))
+  jobs:
+  - deployment: DeployApplication
+    displayName: 'Deploy Application'
+    environment: ${{ parameters.targetEnvironment }}
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - checkout: self
+          
+          # Set environment variables again
+          - script: |
+              if [ "${{ parameters.operation }}" = "create_new" ]; then
+                ENV_NAME="${{ parameters.newEnvironmentName }}"
+              else
+                ENV_NAME="${{ parameters.targetEnvironment }}"
+              fi
+              echo "##vso[task.setvariable variable=ENV_NAME]$ENV_NAME"
+              echo "##vso[task.setvariable variable=RESOURCE_GROUP_NAME]${{ parameters.resourceGroupName }}-$ENV_NAME"
+            displayName: 'Set Environment Variables'
+          
+          # Download artifacts based on operation type
+          - ${{ if eq(parameters.operation, 'promote') }}:
+            - task: DownloadBuildArtifacts@0
+              displayName: 'Download Source Environment Artifacts'
+              inputs:
+                buildType: 'specific'
+                project: '$(System.TeamProject)'
+                pipeline: 'main-build-pipeline'
+                buildVersionToDownload: 'latestFromBranch'
+                branchName: 'refs/heads/main'
+                downloadType: 'specific'
+                downloadPath: '$(System.ArtifactsDirectory)'
+          
+          - ${{ if eq(parameters.operation, 'create_new') }}:
+            - task: DownloadBuildArtifacts@0
+              displayName: 'Download Latest Artifacts'
+              inputs:
+                buildType: 'current'
+                downloadType: 'specific'
+                downloadPath: '$(System.ArtifactsDirectory)'
+          
+          # Deploy application
+          - task: AzureCLI@2
+            displayName: 'Deploy Application to App Service'
+            inputs:
+              azureSubscription: $(subscriptionServiceConnection)
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                # Deploy application (example for different app types)
+                
+                # For Node.js/ZIP deployment
+                if [ -f "$(System.ArtifactsDirectory)/drop/app.zip" ]; then
+                  echo "Deploying ZIP package"
+                  az webapp deployment source config-zip \
+                    --resource-group $(RESOURCE_GROUP_NAME) \
+                    --name "myapp-$(ENV_NAME)" \
+                    --src "$(System.ArtifactsDirectory)/drop/app.zip"
+                fi
+                
+                # For Docker container
+                # az webapp config container set \
+                #   --name "myapp-$(ENV_NAME)" \
+                #   --resource-group $(RESOURCE_GROUP_NAME) \
+                #   --docker-custom-image-name "myregistry.azurecr.io/myapp:latest"
+                
+                # Configure app settings
+                az webapp config appsettings set \
+                  --resource-group $(RESOURCE_GROUP_NAME) \
+                  --name "myapp-$(ENV_NAME)" \
+                  --settings \
+                    ENVIRONMENT=$(ENV_NAME) \
+                    DATABASE_CONNECTION_STRING="$(DATABASE_CONNECTION_STRING_$(ENV_NAME))" \
+                    API_KEY="$(API_KEY)"
+                
+                # Get final app URL
+                APP_URL=$(az webapp show --name "myapp-$(ENV_NAME)" --resource-group $(RESOURCE_GROUP_NAME) --query defaultHostName -o tsv)
+                echo "Application deployed to: https://$APP_URL"
+
+- stage: Testing
+  displayName: 'Post-Deployment Testing'
+  dependsOn: Application
+  condition: and(succeeded(), ne('${{ parameters.operation }}', 'destroy'))
+  jobs:
+  - job: RunTests
+    displayName: 'Run Health Checks and Tests'
+    steps:
+    - script: |
+        # Set environment name
+        if [ "${{ parameters.operation }}" = "create_new" ]; then
+          ENV_NAME="${{ parameters.newEnvironmentName }}"
+        else
+          ENV_NAME="${{ parameters.targetEnvironment }}"
+        fi
+        
+        # Health check endpoint
+        APP_URL="https://myapp-$ENV_NAME.azurewebsites.net"
+        
+        echo "Testing application at: $APP_URL"
+        
+        # Wait for app to be ready
+        echo "Waiting for application to start..."
+        sleep 30
+        
+        # Basic health check
+        response=$(curl -s -o /dev/null -w "%{http_code}" $APP_URL)
+        if [ $response -eq 200 ]; then
+          echo "✓ Health check passed"
+        else
+          echo "✗ Health check failed with status: $response"
+          echo "Trying default endpoint..."
+          response=$(curl -s -o /dev/null -w "%{http_code}" $APP_URL)
+          if [ $response -eq 200 ]; then
+            echo "✓ Default endpoint accessible"
+          else
+            echo "⚠ Application may still be starting up"
+          fi
+        fi
+        
+        # Environment-specific tests
+        if [ "$ENV_NAME" = "staging" ] || [ "$ENV_NAME" = "prod" ]; then
+          echo "Running comprehensive tests for $ENV_NAME environment"
+          # Add your test commands here
+        fi
+      displayName: 'Health Check and Testing'
+
+- stage: Notification
+  displayName: 'Send Notifications'
+  dependsOn: [Infrastructure, Application, Testing]
+  condition: always()
+  jobs:
+  - job: SendNotification
+    displayName: 'Send Deployment Notification'
+    steps:
+    - script: |
+        ENV_NAME="${{ parameters.targetEnvironment }}"
+        if [ "${{ parameters.operation }}" = "create_new" ]; then
+          ENV_NAME="${{ parameters.newEnvironmentName }}"
+        fi
+        
+        STATUS="✓ Success"
+        if [ "$(Agent.JobStatus)" != "Succeeded" ]; then
+          STATUS="✗ Failed"
+        fi
+        
+        echo "=== Deployment Summary ==="
+        echo "Status: $STATUS"
+        echo "Environment: $ENV_NAME"
+        echo "Operation: ${{ parameters.operation }}"
+        echo "Infrastructure Method: ${{ parameters.infrastructureMethod }}"
+        echo "=========================="
+        
+      displayName: 'Send Notification'
