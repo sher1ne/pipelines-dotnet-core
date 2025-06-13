@@ -150,6 +150,7 @@ stages:
                       --parameters environmentName=$(ENV_NAME) \
                       --parameters location="$(location)" \
                       --verbose
+                      --debug
                     
                     DEPLOYMENT_STATUS=$?
                     
@@ -174,7 +175,6 @@ stages:
                       exit 1
                     fi
                   fi
-                  --debug
           
           # Option 2: Using Azure CLI directly
           - ${{ if eq(parameters.infrastructureMethod, 'azure_cli') }}:
