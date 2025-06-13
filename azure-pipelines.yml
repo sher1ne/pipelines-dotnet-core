@@ -4,8 +4,7 @@
 # https://aka.ms/yaml
 
 trigger:
-- master
-
+- none
 parameters:
 - name: operation
   displayName: 'Operation Type'
@@ -15,6 +14,46 @@ parameters:
   - promote
   - create_new
   - destroy
+
+- name: sourceEnvironment
+  displayName: 'Source Environment (for promotion)'
+  type: string
+  default: 'dev'
+  values:
+  - dev
+  - uat
+  - staging
+  - prod
+
+- name: targetEnvironment
+  displayName: 'Target Environment'
+  type: string
+  default: 'staging'
+  values:
+  - dev
+  - uat
+  - staging
+  - prod
+  - feature-branch
+
+- name: newEnvironmentName
+  displayName: 'New Environment Name (for new environments)'
+  type: string
+  default: ''
+
+- name: resourceGroupName
+  displayName: 'Resource Group Name'
+  type: string
+  default: 'rg-myapp'
+  
+- name: infrastructureMethod
+  displayName: 'Infrastructure Method'
+  type: string
+  default: 'bicep'
+  values:
+  - bicep
+  - azure_cli
+  - arm_template
 
 pool:
   vmImage: ubuntu-latest
