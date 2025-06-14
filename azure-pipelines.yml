@@ -1,387 +1,277 @@
-# Azure DevOps Pipeline for Environment Management - BICEP ONLY
-trigger: none
+trigger:
+  branches:
+    include:
+      - main
+      - develop
+      - feature/*
+  paths:
+    include:
+      - 'bicep/*'
+      - 'azure-pipelines.yml'
 
-parameters:
-- name: operation
-  displayName: 'Operation Type'
-  type: string
-  default: 'promote'
-  values:
-  - promote
-  - create_new
-  - destroy
-
-- name: sourceEnvironment
-  displayName: 'Source Environment (for promotion)'
-  type: string
-  default: 'dev'
-  values:
-  - dev
-  - staging
-  - prod
-
-- name: targetEnvironment
-  displayName: 'Target Environment'
-  type: string
-  default: 'staging'
-  values:
-  - dev
-  - staging
-  - prod
-  - feature-branch
-
-- name: newEnvironmentName
-  displayName: 'New Environment Name (for new environments)'
-  type: string
-  default: ''
-
-- name: resourceGroupName
-  displayName: 'Resource Group Name'
-  type: string
-  default: 'rg-myapp'
+pr:
+  branches:
+    include:
+      - main
+      - develop
+  paths:
+    include:
+      - 'bicep/*'
 
 variables:
-- group: 'environment-secrets'
-- name: subscriptionServiceConnection
-  value: 'azure-service-connection-v2'  # UPDATE THIS TO MATCH YOUR SERVICE CONNECTION NAME
-- name: location
-  value: 'East US'
-
-pool:
-  vmImage: 'ubuntu-latest'
+  # Replace with your values
+  azureServiceConnection: 'azure-service-connection-v2'
+  subscriptionId: 'your-subscription-id'
+  location: 'East US'
+  
+  # Build variables
+  vmImageName: 'ubuntu-latest'
+  bicepFile: 'bicep/main.bicep'
+  parametersFile: 'bicep/main.parameters.json'
 
 stages:
+# Always validate first
 - stage: Validate
-  displayName: 'Validate Parameters'
+  displayName: 'Validate Bicep Template'
   jobs:
-  - job: ValidateInputs
-    displayName: 'Validate Pipeline Inputs'
+  - job: ValidateBicep
+    displayName: 'Validate and What-If Analysis'
+    pool:
+      vmImage: $(vmImageName)
     steps:
-    - script: |
-        echo "Operation: ${{ parameters.operation }}"
-        echo "Infrastructure Method: Bicep"
-        
-        # Validate new environment name if creating new
-        if [ "${{ parameters.operation }}" = "create_new" ] && [ -z "${{ parameters.newEnvironmentName }}" ]; then
-          echo "##vso[task.logissue type=error]New environment name is required when creating a new environment"
-          exit 1
-        fi
-        
-        # Validate promotion parameters
-        if [ "${{ parameters.operation }}" = "promote" ] && [ "${{ parameters.sourceEnvironment }}" = "${{ parameters.targetEnvironment }}" ]; then
-          echo "##vso[task.logissue type=error]Source and target environments cannot be the same"
-          exit 1
-        fi
-      displayName: 'Validate Parameters'
-
-- stage: Infrastructure
-  displayName: 'Infrastructure Management'
-  dependsOn: Validate
-  condition: succeeded()
-  jobs:
-  - deployment: ManageInfrastructure
-    displayName: 'Manage Infrastructure with Bicep'
-    environment: ${{ parameters.targetEnvironment }}
-    strategy:
-      runOnce:
-        deploy:
-          steps:
-          - checkout: self
-          
-          # Set environment variables
-          - script: |
-              # Set environment name
-              if [ "${{ parameters.operation }}" = "create_new" ]; then
-                ENV_NAME="${{ parameters.newEnvironmentName }}"
-              else
-                ENV_NAME="${{ parameters.targetEnvironment }}"
-              fi
-              echo "##vso[task.setvariable variable=ENV_NAME]$ENV_NAME"
-              echo "##vso[task.setvariable variable=RESOURCE_GROUP_NAME]${{ parameters.resourceGroupName }}-$ENV_NAME"
-            displayName: 'Set Environment Variables'
-          
-          # Deploy Infrastructure with Bicep
-          - task: AzureCLI@2
-            displayName: 'Deploy Infrastructure with Bicep'
-            inputs:
-              azureSubscription: $(subscriptionServiceConnection)
-              scriptType: 'bash'
-              scriptLocation: 'inlineScript'
-              inlineScript: |
-                if [ "${{ parameters.operation }}" = "destroy" ]; then
-                  echo "Deleting resource group: $(RESOURCE_GROUP_NAME)"
-                  az group delete --name $(RESOURCE_GROUP_NAME) --yes --no-wait
-                  echo "✓ Resource group deletion initiated"
-                else
-                  echo "Deploying infrastructure to: $(RESOURCE_GROUP_NAME)"
-                  
-                  # Create resource group if it doesn't exist
-                  echo "Creating resource group..."
-                  az group create --name $(RESOURCE_GROUP_NAME) --location "$(location)"
-                  
-                  # Deploy Bicep template
-                  echo "Deploying Bicep template..."
-                  
-                  # Check if bicep file exists
-                  if [ ! -f "bicep/main.bicep" ]; then
-                    echo "ERROR: bicep/main.bicep file not found!"
-                    echo "Current directory: $(pwd)"
-                    echo "Files in current directory:"
-                    ls -la
-                    echo "Files in bicep directory (if it exists):"
-                    ls -la bicep/ 2>/dev/null || echo "bicep directory does not exist"
-                    exit 1
-                  fi
-                  
-                  # Deploy Bicep template with unique deployment name
-                  DEPLOYMENT_NAME="bicep-deployment-$(date +%Y%m%d-%H%M%S)"
-                  echo "Deployment name: $DEPLOYMENT_NAME"
-                  
-                  az deployment group create \
-                    --resource-group $(RESOURCE_GROUP_NAME) \
-                    --template-file bicep/main.bicep \
-                    --name "$DEPLOYMENT_NAME" \
-                    --parameters environmentName=$(ENV_NAME) \
-                    --parameters location="$(location)" \
-                    --verbose
-                  
-                  DEPLOYMENT_STATUS=$?
-                  
-                  if [ $DEPLOYMENT_STATUS -eq 0 ]; then
-                    echo "✓ Bicep deployment successful"
-                    
-                    # Get outputs if deployment succeeded
-                    echo "Getting deployment outputs..."
-                    
-                    # Get storage account name from outputs
-                    STORAGE_NAME=$(az deployment group show \
-                      --resource-group $(RESOURCE_GROUP_NAME) \
-                      --name "$DEPLOYMENT_NAME" \
-                      --query properties.outputs.storageAccountName.value \
-                      --output tsv 2>/dev/null || echo "")
-                    
-                    if [ ! -z "$STORAGE_NAME" ]; then
-                      echo "##vso[task.setvariable variable=STORAGE_ACCOUNT_NAME]$STORAGE_NAME"
-                      echo "Storage Account Created: $STORAGE_NAME"
-                    else
-                      echo "No storage account name found in outputs"
-                    fi
-                    
-                    # Get resource group name from outputs
-                    RG_NAME=$(az deployment group show \
-                      --resource-group $(RESOURCE_GROUP_NAME) \
-                      --name "$DEPLOYMENT_NAME" \
-                      --query properties.outputs.resourceGroupName.value \
-                      --output tsv 2>/dev/null || echo "")
-                    
-                    if [ ! -z "$RG_NAME" ]; then
-                      echo "Resource Group: $RG_NAME"
-                    fi
-                    
-                  else
-                    echo "✗ Bicep deployment failed with exit code: $DEPLOYMENT_STATUS"
-                    exit 1
-                  fi
-                fi
-
-- stage: Application
-  displayName: 'Application Deployment'
-  dependsOn: Infrastructure
-  condition: and(succeeded(), ne('${{ parameters.operation }}', 'destroy'))
-  jobs:
-  - deployment: DeployApplication
-    displayName: 'Deploy Application'
-    environment: ${{ parameters.targetEnvironment }}
-    strategy:
-      runOnce:
-        deploy:
-          steps:
-          - checkout: self
-          
-          # Set environment variables again
-          - script: |
-              if [ "${{ parameters.operation }}" = "create_new" ]; then
-                ENV_NAME="${{ parameters.newEnvironmentName }}"
-              else
-                ENV_NAME="${{ parameters.targetEnvironment }}"
-              fi
-              echo "##vso[task.setvariable variable=ENV_NAME]$ENV_NAME"
-              echo "##vso[task.setvariable variable=RESOURCE_GROUP_NAME]${{ parameters.resourceGroupName }}-$ENV_NAME"
-            displayName: 'Set Environment Variables'
-          
-          # Download artifacts based on operation type (OPTIONAL - only if you have build artifacts)
-          - ${{ if eq(parameters.operation, 'promote') }}:
-            - script: |
-                echo "Promoting from ${{ parameters.sourceEnvironment }} to ${{ parameters.targetEnvironment }}"
-                echo "Note: Artifact download step disabled - no build pipeline configured"
-                echo "To enable artifact downloads, update the pipeline name in the YAML"
-              displayName: 'Promotion Info (Artifacts Disabled)'
-            
-            # Uncomment and update this section when you have a build pipeline:
-            # - task: DownloadBuildArtifacts@0
-            #   displayName: 'Download Source Environment Artifacts'
-            #   inputs:
-            #     buildType: 'specific'
-            #     project: '$(System.TeamProject)'
-            #     pipeline: 'YOUR-ACTUAL-BUILD-PIPELINE-NAME'  # UPDATE THIS
-            #     buildVersionToDownload: 'latestFromBranch'
-            #     branchName: 'refs/heads/main'
-            #     downloadType: 'specific'
-            #     downloadPath: '$(System.ArtifactsDirectory)'
-          
-          - ${{ if eq(parameters.operation, 'create_new') }}:
-            - script: |
-                echo "Creating new environment: ${{ parameters.newEnvironmentName }}"
-                echo "Note: Artifact download step disabled - no build pipeline configured"
-                echo "To enable artifact downloads, update the pipeline name in the YAML"
-              displayName: 'New Environment Info (Artifacts Disabled)'
-            
-            # Uncomment and update this section when you have a build pipeline:
-            # - task: DownloadBuildArtifacts@0
-            #   displayName: 'Download Latest Artifacts'
-            #   inputs:
-            #     buildType: 'current'
-            #     downloadType: 'specific'
-            #     downloadPath: '$(System.ArtifactsDirectory)'
-          
-          # Deploy application
-          - task: AzureCLI@2
-            displayName: 'Deploy Application'
-            inputs:
-              azureSubscription: $(subscriptionServiceConnection)
-              scriptType: 'bash'
-              scriptLocation: 'inlineScript'
-              inlineScript: |
-                echo "Application deployment for environment: $(ENV_NAME)"
-                echo "Resource Group: $(RESOURCE_GROUP_NAME)"
-                
-                # Since your current Bicep template only creates a storage account,
-                # this is a placeholder for future application deployment
-                echo "Storage Account: $(STORAGE_ACCOUNT_NAME)"
-                
-                # Example deployment steps (uncomment when you have actual app artifacts):
-                
-                # For ZIP deployment to App Service:
-                # if [ -f "$(System.ArtifactsDirectory)/drop/app.zip" ]; then
-                #   echo "Deploying ZIP package to App Service"
-                #   az webapp deployment source config-zip \
-                #     --resource-group $(RESOURCE_GROUP_NAME) \
-                #     --name "myapp-$(ENV_NAME)" \
-                #     --src "$(System.ArtifactsDirectory)/drop/app.zip"
-                # else
-                #   echo "No ZIP artifact found for deployment"
-                # fi
-                
-                # For container deployment:
-                # az webapp config container set \
-                #   --name "myapp-$(ENV_NAME)" \
-                #   --resource-group $(RESOURCE_GROUP_NAME) \
-                #   --docker-custom-image-name "myregistry.azurecr.io/myapp:latest"
-                
-                # Configure app settings (if you had a web app):
-                # az webapp config appsettings set \
-                #   --resource-group $(RESOURCE_GROUP_NAME) \
-                #   --name "myapp-$(ENV_NAME)" \
-                #   --settings \
-                #     ENVIRONMENT=$(ENV_NAME) \
-                #     STORAGE_ACCOUNT="$(STORAGE_ACCOUNT_NAME)"
-                
-                echo "✓ Application deployment completed"
-
-- stage: Testing
-  displayName: 'Post-Deployment Testing'
-  dependsOn: Application
-  condition: and(succeeded(), ne('${{ parameters.operation }}', 'destroy'))
-  jobs:
-  - job: RunTests
-    displayName: 'Run Health Checks and Tests'
-    steps:
-    # Login to Azure first for testing
     - task: AzureCLI@2
-      displayName: 'Health Check and Testing'
+      displayName: 'Install Bicep CLI'
       inputs:
-        azureSubscription: $(subscriptionServiceConnection)
+        azureSubscription: $(azureServiceConnection)
         scriptType: 'bash'
         scriptLocation: 'inlineScript'
         inlineScript: |
-          # Set environment name
-          if [ "${{ parameters.operation }}" = "create_new" ]; then
-            ENV_NAME="${{ parameters.newEnvironmentName }}"
-          else
-            ENV_NAME="${{ parameters.targetEnvironment }}"
-          fi
-          
-          RESOURCE_GROUP_NAME="${{ parameters.resourceGroupName }}-$ENV_NAME"
-          
-          echo "Running tests for environment: $ENV_NAME"
-          echo "Resource Group: $RESOURCE_GROUP_NAME"
-          
-          # Basic infrastructure validation
-          echo "Validating deployed infrastructure..."
-          
-          # Check if resource group exists
-          if az group show --name "$RESOURCE_GROUP_NAME" --output none 2>/dev/null; then
-            echo "✓ Resource group exists: $RESOURCE_GROUP_NAME"
-          else
-            echo "✗ Resource group not found: $RESOURCE_GROUP_NAME"
-            echo "Available resource groups:"
-            az group list --query "[].name" --output table
-            exit 1
-          fi
-          
-          # List resources in the group
-          echo "Resources in group $RESOURCE_GROUP_NAME:"
-          az resource list --resource-group "$RESOURCE_GROUP_NAME" --output table
-          
-          # Validate storage account (from Bicep template)
-          echo "Validating storage account..."
-          STORAGE_ACCOUNTS=$(az storage account list --resource-group "$RESOURCE_GROUP_NAME" --query "[].name" --output tsv)
-          if [ ! -z "$STORAGE_ACCOUNTS" ]; then
-            echo "✓ Storage account(s) found: $STORAGE_ACCOUNTS"
-          else
-            echo "⚠ No storage accounts found in resource group"
-          fi
-          
-          # Environment-specific tests
-          if [ "$ENV_NAME" = "staging" ] || [ "$ENV_NAME" = "prod" ]; then
-            echo "Running comprehensive tests for $ENV_NAME environment"
-            # Add your environment-specific test commands here
-            
-            # Example: Test storage account access
-            for STORAGE_NAME in $STORAGE_ACCOUNTS; do
-              echo "Testing storage account: $STORAGE_NAME"
-              # Get storage account info
-              az storage account show --name "$STORAGE_NAME" --resource-group "$RESOURCE_GROUP_NAME" --query "statusOfPrimary" --output tsv
-            done
-          fi
-          
-          echo "✓ All tests completed successfully"
+          az bicep install
+          echo "Bicep version: $(az bicep version)"
 
-- stage: Notification
-  displayName: 'Send Notifications'
-  dependsOn: [Infrastructure, Application, Testing]
-  condition: always()
+    - task: AzureCLI@2
+      displayName: 'Lint and Build Bicep'
+      inputs:
+        azureSubscription: $(azureServiceConnection)
+        scriptType: 'bash'
+        scriptLocation: 'inlineScript'
+        inlineScript: |
+          echo "Linting Bicep template..."
+          az bicep build --file $(bicepFile)
+          echo "✅ Bicep template is syntactically valid"
+
+    - task: AzureCLI@2
+      displayName: 'What-If Analysis (Dev)'
+      inputs:
+        azureSubscription: $(azureServiceConnection)
+        scriptType: 'bash'
+        scriptLocation: 'inlineScript'
+        inlineScript: |
+          echo "🔍 Analyzing changes for Development environment..."
+          az deployment group what-if \
+            --resource-group "rg-myapp-dev" \
+            --template-file $(bicepFile) \
+            --parameters @$(parametersFile) environment=dev \
+            --result-format FullResourcePayloads
+
+# Deploy to Development (automatic for develop branch)
+- stage: DeployDev
+  displayName: '🚀 Deploy to Development'
+  dependsOn: Validate
+  condition: |
+    and(
+      succeeded(),
+      or(
+        eq(variables['Build.SourceBranch'], 'refs/heads/develop'),
+        eq(variables['Build.SourceBranch'], 'refs/heads/main')
+      )
+    )
+  variables:
+    resourceGroupName: 'rg-myapp-dev'
+    environmentName: 'dev'
   jobs:
-  - job: SendNotification
-    displayName: 'Send Deployment Notification'
-    steps:
-    - script: |
-        ENV_NAME="${{ parameters.targetEnvironment }}"
-        if [ "${{ parameters.operation }}" = "create_new" ]; then
-          ENV_NAME="${{ parameters.newEnvironmentName }}"
-        fi
-        
-        STATUS="✓ Success"
-        if [ "$(Agent.JobStatus)" != "Succeeded" ]; then
-          STATUS="✗ Failed"
-        fi
-        
-        echo "=== Bicep Deployment Summary ==="
-        echo "Status: $STATUS"
-        echo "Environment: $ENV_NAME"
-        echo "Operation: ${{ parameters.operation }}"
-        echo "Infrastructure Method: Bicep"
-        echo "Resource Group: ${{ parameters.resourceGroupName }}-$ENV_NAME"
-        echo "==============================="
-        
-      displayName: 'Send Notification'
+  - deployment: DeployToDev
+    displayName: 'Deploy to Development'
+    pool:
+      vmImage: $(vmImageName)
+    environment: 'development'
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - checkout: self
+          
+          - task: AzureCLI@2
+            displayName: 'Deploy to Development'
+            inputs:
+              azureServiceConnection: $(azureServiceConnection)
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                az bicep install
+                
+                echo "🚀 Deploying to Development environment..."
+                az deployment group create \
+                  --resource-group $(resourceGroupName) \
+                  --template-file $(bicepFile) \
+                  --parameters @$(parametersFile) environment=$(environmentName) \
+                  --name "bicep-$(environmentName)-$(Build.BuildNumber)" \
+                  --verbose
+                
+                echo "✅ Development deployment completed"
+
+          - task: AzureCLI@2
+            displayName: 'Verify Development Deployment'
+            inputs:
+              azureServiceConnection: $(azureServiceConnection)
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                echo "🔍 Verifying deployment..."
+                az deployment group show \
+                  --resource-group $(resourceGroupName) \
+                  --name "bicep-$(environmentName)-$(Build.BuildNumber)" \
+                  --query properties.provisioningState
+                
+                echo "📊 Deployment outputs:"
+                az deployment group show \
+                  --resource-group $(resourceGroupName) \
+                  --name "bicep-$(environmentName)-$(Build.BuildNumber)" \
+                  --query properties.outputs
+
+# Deploy to Staging (automatic promotion from dev, only for main branch)
+- stage: DeployStaging
+  displayName: '🎯 Deploy to Staging'
+  dependsOn: DeployDev
+  condition: |
+    and(
+      succeeded(),
+      eq(variables['Build.SourceBranch'], 'refs/heads/main')
+    )
+  variables:
+    resourceGroupName: 'rg-myapp-staging'
+    environmentName: 'staging'
+  jobs:
+  - deployment: DeployToStaging
+    displayName: 'Deploy to Staging'
+    pool:
+      vmImage: $(vmImageName)
+    environment: 'staging'
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - checkout: self
+          
+          - task: AzureCLI@2
+            displayName: 'What-If Analysis (Staging)'
+            inputs:
+              azureSubscription: $(azureServiceConnection)
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                az bicep install
+                echo "🔍 Analyzing changes for Staging environment..."
+                az deployment group what-if \
+                  --resource-group $(resourceGroupName) \
+                  --template-file $(bicepFile) \
+                  --parameters @$(parametersFile) environment=$(environmentName) \
+                  --result-format FullResourcePayloads
+
+          - task: AzureCLI@2
+            displayName: 'Deploy to Staging'
+            inputs:
+              azureServiceConnection: $(azureServiceConnection)
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                echo "🎯 Deploying to Staging environment..."
+                az deployment group create \
+                  --resource-group $(resourceGroupName) \
+                  --template-file $(bicepFile) \
+                  --parameters @$(parametersFile) environment=$(environmentName) \
+                  --name "bicep-$(environmentName)-$(Build.BuildNumber)" \
+                  --verbose
+                
+                echo "✅ Staging deployment completed"
+
+# Deploy to Production (manual approval required)
+- stage: DeployProd
+  displayName: '🏭 Deploy to Production'
+  dependsOn: DeployStaging
+  condition: |
+    and(
+      succeeded(),
+      eq(variables['Build.SourceBranch'], 'refs/heads/main')
+    )
+  variables:
+    resourceGroupName: 'rg-myapp-prod'
+    environmentName: 'prod'
+  jobs:
+  - deployment: DeployToProduction
+    displayName: 'Deploy to Production'
+    pool:
+      vmImage: $(vmImageName)
+    environment: 'production'
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - checkout: self
+          
+          - task: AzureCLI@2
+            displayName: 'Final What-If Analysis (Production)'
+            inputs:
+              azureSubscription: $(azureServiceConnection)
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                az bicep install
+                echo "🔍 Final analysis for Production environment..."
+                az deployment group what-if \
+                  --resource-group $(resourceGroupName) \
+                  --template-file $(bicepFile) \
+                  --parameters @$(parametersFile) environment=$(environmentName) \
+                  --result-format FullResourcePayloads
+
+          - task: AzureCLI@2
+            displayName: 'Deploy to Production'
+            inputs:
+              azureSubscription: $(azureServiceConnection)
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                echo "🏭 Deploying to Production environment..."
+                az deployment group create \
+                  --resource-group $(resourceGroupName) \
+                  --template-file $(bicepFile) \
+                  --parameters @$(parametersFile) environment=$(environmentName) \
+                  --name "bicep-$(environmentName)-$(Build.BuildNumber)" \
+                  --verbose
+                
+                echo "🎉 Production deployment completed successfully!"
+
+          - task: AzureCLI@2
+            displayName: 'Post-Deployment Verification'
+            inputs:
+              azureServiceConnection: $(azureServiceConnection)
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                echo "🔍 Verifying production deployment..."
+                deploymentStatus=$(az deployment group show \
+                  --resource-group $(resourceGroupName) \
+                  --name "bicep-$(environmentName)-$(Build.BuildNumber)" \
+                  --query properties.provisioningState -o tsv)
+                
+                if [ "$deploymentStatus" = "Succeeded" ]; then
+                  echo "✅ Production deployment verified successfully"
+                  echo "📊 Deployment outputs:"
+                  az deployment group show \
+                    --resource-group $(resourceGroupName) \
+                    --name "bicep-$(environmentName)-$(Build.BuildNumber)" \
+                    --query properties.outputs
+                else
+                  echo "❌ Production deployment verification failed"
+                  exit 1
+                fi
