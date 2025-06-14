@@ -9,6 +9,12 @@ parameters:
   - promote
   - create_new
   - destroy
+  - extract_and_recreate  # NEW OPTION
+
+- name: sourceResourceGroup
+  displayName: 'Source Resource Group (for extract_and_recreate)'
+  type: string
+  default: ''
 
 - name: sourceEnvironment
   displayName: 'Source Environment (for promotion)'
@@ -51,10 +57,11 @@ parameters:
   - arm_template
 
 - name: vmSize
-  displayName: 'VM Size'
+  displayName: 'VM Size (override extracted value)'
   type: string
-  default: 'Standard_B2s'
+  default: 'auto-detect'
   values:
+  - auto-detect
   - Standard_B1s
   - Standard_B2s
   - Standard_B4ms
@@ -62,21 +69,16 @@ parameters:
   - Standard_D4s_v3
 
 - name: vmCount
-  displayName: 'Number of VMs'
+  displayName: 'Number of VMs (override extracted value)'
   type: number
-  default: 3
-  values:
-  - 1
-  - 2
-  - 3
-  - 4
-  - 5
+  default: 0  # 0 means auto-detect
 
 - name: appGatewayTier
-  displayName: 'Application Gateway Tier'
+  displayName: 'Application Gateway Tier (override extracted value)'
   type: string
-  default: 'Standard_v2'
+  default: 'auto-detect'
   values:
+  - auto-detect
   - Standard_v2
   - WAF_v2
 
@@ -106,6 +108,12 @@ stages:
         echo "VM Count: ${{ parameters.vmCount }}"
         echo "App Gateway Tier: ${{ parameters.appGatewayTier }}"
         
+        # Validate extract_and_recreate parameters
+        if [ "${{ parameters.operation }}" = "extract_and_recreate" ] && [ -z "${{ parameters.sourceResourceGroup }}" ]; then
+          echo "##vso[task.logissue type=error]Source Resource Group is required for extract_and_recreate operation"
+          exit 1
+        fi
+        
         # Validate new environment name if creating new
         if [ "${{ parameters.operation }}" = "create_new" ] && [ -z "${{ parameters.newEnvironmentName }}" ]; then
           echo "##vso[task.logissue type=error]New environment name is required when creating a new environment"
@@ -119,20 +127,108 @@ stages:
         fi
         
         # Validate VM count
-        if [ ${{ parameters.vmCount }} -lt 1 ] || [ ${{ parameters.vmCount }} -gt 5 ]; then
-          echo "##vso[task.logissue type=error]VM count must be between 1 and 5"
-          exit 1
+        if [ ${{ parameters.vmCount }} -lt 0 ] || [ ${{ parameters.vmCount }} -gt 5 ]; then
+          if [ ${{ parameters.vmCount }} -ne 0 ]; then  # 0 is allowed for auto-detect
+            echo "##vso[task.logissue type=error]VM count must be between 0 and 5 (0 = auto-detect)"
+            exit 1
+          fi
         fi
       displayName: 'Validate Parameters'
 
+# NEW STAGE: Extract Configuration
+- stage: Extract
+  displayName: 'Extract Source Configuration'
+  dependsOn: Validate
+  condition: and(succeeded(), eq('${{ parameters.operation }}', 'extract_and_recreate'))
+  jobs:
+  - job: ExtractConfig
+    displayName: 'Extract Resource Configuration'
+    steps:
+    - checkout: self
+    
+    - task: AzureCLI@2
+      displayName: 'Extract Resource Group Configuration'
+      inputs:
+        azureSubscription: $(subscriptionServiceConnection)
+        scriptType: 'bash'
+        scriptLocation: 'scriptPath'
+        scriptPath: 'scripts/extract-resources.sh'
+        arguments: '${{ parameters.sourceResourceGroup }}'
+      env:
+        SOURCE_RG: ${{ parameters.sourceResourceGroup }}
+    
+    - script: |
+        # Read the extracted configuration
+        if [ -f "extracted-config.json" ]; then
+          echo "=== EXTRACTED CONFIGURATION ==="
+          cat extracted-config.json | jq .
+          
+          # Extract values for next stage
+          EXTRACTED_VM_COUNT=$(cat extracted-config.json | jq -r '.discoveredResources.virtualMachines.count // 0')
+          EXTRACTED_VM_SIZE=$(cat extracted-config.json | jq -r '.discoveredResources.virtualMachines.size // "Standard_B2s"')
+          EXTRACTED_AGW_TIER=$(cat extracted-config.json | jq -r '.discoveredResources.applicationGateway.tier // "Standard_v2"')
+          EXTRACTED_ADMIN_USER=$(cat extracted-config.json | jq -r '.discoveredResources.virtualMachines.adminUsername // "azureuser"')
+          
+          # Use parameter overrides if provided, otherwise use extracted values
+          FINAL_VM_COUNT=${{ parameters.vmCount }}
+          if [ "$FINAL_VM_COUNT" = "0" ]; then
+            FINAL_VM_COUNT=$EXTRACTED_VM_COUNT
+          fi
+          
+          FINAL_VM_SIZE="${{ parameters.vmSize }}"
+          if [ "$FINAL_VM_SIZE" = "auto-detect" ]; then
+            FINAL_VM_SIZE=$EXTRACTED_VM_SIZE
+          fi
+          
+          FINAL_AGW_TIER="${{ parameters.appGatewayTier }}"
+          if [ "$FINAL_AGW_TIER" = "auto-detect" ]; then
+            FINAL_AGW_TIER=$EXTRACTED_AGW_TIER
+          fi
+          
+          # Set variables for next stage
+          echo "##vso[task.setvariable variable=EXTRACTED_VM_COUNT;isOutput=true]$FINAL_VM_COUNT"
+          echo "##vso[task.setvariable variable=EXTRACTED_VM_SIZE;isOutput=true]$FINAL_VM_SIZE"
+          echo "##vso[task.setvariable variable=EXTRACTED_AGW_TIER;isOutput=true]$FINAL_AGW_TIER"
+          echo "##vso[task.setvariable variable=EXTRACTED_ADMIN_USER;isOutput=true]$EXTRACTED_ADMIN_USER"
+          
+          echo "=== FINAL PARAMETERS FOR DEPLOYMENT ==="
+          echo "VM Count: $FINAL_VM_COUNT"
+          echo "VM Size: $FINAL_VM_SIZE"
+          echo "App Gateway Tier: $FINAL_AGW_TIER"
+          echo "Admin Username: $EXTRACTED_ADMIN_USER"
+        else
+          echo "##vso[task.logissue type=error]extracted-config.json not found"
+          exit 1
+        fi
+      name: ProcessExtraction
+      displayName: 'Process Extracted Configuration'
+
 - stage: Infrastructure
   displayName: 'Infrastructure Management'
-  dependsOn: Validate
-  condition: succeeded()
+  dependsOn: 
+  - Validate
+  - Extract
+  condition: |
+    and(
+      succeeded(),
+      or(
+        ne('${{ parameters.operation }}', 'extract_and_recreate'),
+        and(
+          eq('${{ parameters.operation }}', 'extract_and_recreate'),
+          succeeded('Extract')
+        )
+      )
+    )
   jobs:
   - deployment: ManageInfrastructure
     displayName: 'Manage Infrastructure'
     environment: ${{ parameters.targetEnvironment }}
+    # Get extracted values if available
+    variables:
+      EXTRACTED_VM_COUNT: $[ stageDependencies.Extract.ExtractConfig.outputs['ProcessExtraction.EXTRACTED_VM_COUNT'] ]
+      EXTRACTED_VM_SIZE: $[ stageDependencies.Extract.ExtractConfig.outputs['ProcessExtraction.EXTRACTED_VM_SIZE'] ]
+      EXTRACTED_AGW_TIER: $[ stageDependencies.Extract.ExtractConfig.outputs['ProcessExtraction.EXTRACTED_AGW_TIER'] ]
+      EXTRACTED_ADMIN_USER: $[ stageDependencies.Extract.ExtractConfig.outputs['ProcessExtraction.EXTRACTED_ADMIN_USER'] ]
     strategy:
       runOnce:
         deploy:
@@ -144,16 +240,43 @@ stages:
               # Set environment name
               if [ "${{ parameters.operation }}" = "create_new" ]; then
                 ENV_NAME="${{ parameters.newEnvironmentName }}"
+              elif [ "${{ parameters.operation }}" = "extract_and_recreate" ]; then
+                # Generate name based on source RG
+                SOURCE_RG="${{ parameters.sourceResourceGroup }}"
+                ENV_NAME=$(echo "$SOURCE_RG" | sed 's/rg-//' | sed 's/myapp-//' | sed 's/-.*$//')-replica
               else
                 ENV_NAME="${{ parameters.targetEnvironment }}"
               fi
               echo "##vso[task.setvariable variable=ENV_NAME]$ENV_NAME"
               echo "##vso[task.setvariable variable=RESOURCE_GROUP_NAME]${{ parameters.resourceGroupName }}-$ENV_NAME"
               
+              # Set VM parameters (use extracted values if available, otherwise use pipeline parameters)
+              if [ "${{ parameters.operation }}" = "extract_and_recreate" ]; then
+                VM_COUNT_PARAM="$(EXTRACTED_VM_COUNT)"
+                VM_SIZE_PARAM="$(EXTRACTED_VM_SIZE)"
+                AGW_TIER_PARAM="$(EXTRACTED_AGW_TIER)"
+                ADMIN_USER_PARAM="$(EXTRACTED_ADMIN_USER)"
+              else
+                VM_COUNT_PARAM=${{ parameters.vmCount }}
+                VM_SIZE_PARAM="${{ parameters.vmSize }}"
+                AGW_TIER_PARAM="${{ parameters.appGatewayTier }}"
+                ADMIN_USER_PARAM=$(vmAdminUsername)
+              fi
+              
+              echo "##vso[task.setvariable variable=VM_COUNT_PARAM]$VM_COUNT_PARAM"
+              echo "##vso[task.setvariable variable=VM_SIZE_PARAM]$VM_SIZE_PARAM"
+              echo "##vso[task.setvariable variable=AGW_TIER_PARAM]$AGW_TIER_PARAM"
+              echo "##vso[task.setvariable variable=ADMIN_USER_PARAM]$ADMIN_USER_PARAM"
+              
               # Generate secure VM password
               VM_PASSWORD="$(openssl rand -base64 32 | tr -d /=+ | cut -c -16)Aa1!"
               echo "##vso[task.setvariable variable=VM_PASSWORD;isSecret=true]$VM_PASSWORD"
-              echo "VM password generated securely"
+              
+              echo "Environment: $ENV_NAME"
+              echo "Resource Group: ${{ parameters.resourceGroupName }}-$ENV_NAME"
+              echo "VM Count: $VM_COUNT_PARAM"
+              echo "VM Size: $VM_SIZE_PARAM"
+              echo "App Gateway Tier: $AGW_TIER_PARAM"
             displayName: 'Set Environment Variables'
           
           # Option 1: Using Bicep with VMs and Load Balancer
@@ -171,6 +294,11 @@ stages:
                     echo "✓ Resource group deletion initiated"
                   else
                     echo "Deploying infrastructure to: $(RESOURCE_GROUP_NAME)"
+                    echo "Operation: ${{ parameters.operation }}"
+                    
+                    if [ "${{ parameters.operation }}" = "extract_and_recreate" ]; then
+                      echo "Recreating configuration from: ${{ parameters.sourceResourceGroup }}"
+                    fi
                     
                     # Create resource group if it doesn't exist
                     echo "Creating resource group..."
@@ -196,12 +324,12 @@ stages:
                       --template-file bicep/main.bicep \
                       --parameters environmentName=$(ENV_NAME) \
                       --parameters location="$(location)" \
-                      --parameters vmAdminUsername=$(vmAdminUsername) \
+                      --parameters vmAdminUsername=$(ADMIN_USER_PARAM) \
                       --parameters vmAdminPassword="$(VM_PASSWORD)" \
-                      --parameters vmSize="${{ parameters.vmSize }}" \
-                      --parameters vmCount=${{ parameters.vmCount }} \
-                      --parameters appGatewayTier="${{ parameters.appGatewayTier }}" \
-                      --parameters appGatewaySkuName="${{ parameters.appGatewayTier }}" \
+                      --parameters vmSize="$(VM_SIZE_PARAM)" \
+                      --parameters vmCount=$(VM_COUNT_PARAM) \
+                      --parameters appGatewayTier="$(AGW_TIER_PARAM)" \
+                      --parameters appGatewaySkuName="$(AGW_TIER_PARAM)" \
                       --verbose
                     
                     DEPLOYMENT_STATUS=$?
@@ -263,19 +391,24 @@ stages:
                       # Display deployment summary
                       echo ""
                       echo "=== Infrastructure Deployment Summary ==="
-                      echo "Environment: $(ENV_NAME)"
-                      echo "Resource Group: $(RESOURCE_GROUP_NAME)"
-                      echo "VM Count: ${{ parameters.vmCount }}"
-                      echo "VM Size: ${{ parameters.vmSize }}"
+                      if [ "${{ parameters.operation }}" = "extract_and_recreate" ]; then
+                        echo "Source: ${{ parameters.sourceResourceGroup }}"
+                        echo "Recreated as: $(RESOURCE_GROUP_NAME)"
+                      else
+                        echo "Environment: $(ENV_NAME)"
+                        echo "Resource Group: $(RESOURCE_GROUP_NAME)"
+                      fi
+                      echo "VM Count: $(VM_COUNT_PARAM)"
+                      echo "VM Size: $(VM_SIZE_PARAM)"
                       echo ""
                       echo "URLs:"
                       [ ! -z "$AGW_FQDN" ] && echo "  Application Gateway: http://$AGW_FQDN"
                       [ ! -z "$LB_FQDN" ] && echo "  Load Balancer: http://$LB_FQDN"
                       echo ""
                       echo "SSH Access (via Load Balancer):"
-                      for i in $(seq 0 $((${parameters.vmCount} - 1))); do
+                      for i in $(seq 0 $(($(VM_COUNT_PARAM) - 1))); do
                         PORT=$((2200 + i))
-                        echo "  VM$i: ssh $(vmAdminUsername)@$LB_FQDN -p $PORT"
+                        echo "  VM$i: ssh $(ADMIN_USER_PARAM)@$LB_FQDN -p $PORT"
                       done
                       echo ""
                       echo "Storage Account: $STORAGE_NAME"
@@ -335,26 +468,25 @@ stages:
                       --platform-update-domain-count 3
                     
                     # Create VMs
-                    for i in $(seq 0 $((${parameters.vmCount} - 1))); do
+                    for i in $(seq 0 $(($(VM_COUNT_PARAM) - 1))); do
                       az vm create \
                         --name "vm$i-$(ENV_NAME)" \
                         --resource-group $(RESOURCE_GROUP_NAME) \
                         --availability-set "avset-$(ENV_NAME)" \
                         --image UbuntuLTS \
-                        --size "${{ parameters.vmSize }}" \
-                        --admin-username $(vmAdminUsername) \
+                        --size "$(VM_SIZE_PARAM)" \
+                        --admin-username $(ADMIN_USER_PARAM) \
                         --admin-password "$(VM_PASSWORD)" \
                         --vnet-name "vnet-$(ENV_NAME)" \
                         --subnet backend-subnet \
                         --nsg "" \
-                        --public-ip "" \
-                        --custom-data cloud-init.txt
+                        --public-ip ""
                     done
                     
                     echo "✓ Infrastructure created with Azure CLI"
                   fi
           
-          # Option 3: Using ARM Template (placeholder - would need ARM template updates)
+          # Option 3: Using ARM Template
           - ${{ if eq(parameters.infrastructureMethod, 'arm_template') }}:
             - task: AzureResourceManagerTemplateDeployment@3
               displayName: 'Deploy ARM Template'
@@ -371,10 +503,10 @@ stages:
                 codeParametersLocation: 'arm-templates/azuredeploy.parameters.json'
                 overrideParameters: |
                   -environmentName $(ENV_NAME)
-                  -vmAdminUsername $(vmAdminUsername)
+                  -vmAdminUsername $(ADMIN_USER_PARAM)
                   -vmAdminPassword $(VM_PASSWORD)
-                  -vmSize ${{ parameters.vmSize }}
-                  -vmCount ${{ parameters.vmCount }}
+                  -vmSize $(VM_SIZE_PARAM)
+                  -vmCount $(VM_COUNT_PARAM)
                 deploymentMode: 'Incremental'
             
             - task: AzureCLI@2
@@ -405,6 +537,9 @@ stages:
           - script: |
               if [ "${{ parameters.operation }}" = "create_new" ]; then
                 ENV_NAME="${{ parameters.newEnvironmentName }}"
+              elif [ "${{ parameters.operation }}" = "extract_and_recreate" ]; then
+                SOURCE_RG="${{ parameters.sourceResourceGroup }}"
+                ENV_NAME=$(echo "$SOURCE_RG" | sed 's/rg-//' | sed 's/myapp-//' | sed 's/-.*$//')-replica
               else
                 ENV_NAME="${{ parameters.targetEnvironment }}"
               fi
@@ -473,11 +608,15 @@ stages:
         # Set environment name
         if [ "${{ parameters.operation }}" = "create_new" ]; then
           ENV_NAME="${{ parameters.newEnvironmentName }}"
+        elif [ "${{ parameters.operation }}" = "extract_and_recreate" ]; then
+          SOURCE_RG="${{ parameters.sourceResourceGroup }}"
+          ENV_NAME=$(echo "$SOURCE_RG" | sed 's/rg-//' | sed 's/myapp-//' | sed 's/-.*$//')-replica
         else
           ENV_NAME="${{ parameters.targetEnvironment }}"
         fi
         
         echo "Testing infrastructure for environment: $ENV_NAME"
+        echo "Operation: ${{ parameters.operation }}"
         echo "Application Gateway URL: $(APP_GATEWAY_URL)"
         echo "Load Balancer URL: $(LOAD_BALANCER_URL)"
         
@@ -536,6 +675,19 @@ stages:
           echo "Running comprehensive tests for $ENV_NAME environment"
           # Add performance tests, security scans, etc.
         fi
+        
+        # Show summary
+        echo ""
+        echo "=== TESTING SUMMARY ==="
+        if [ "${{ parameters.operation }}" = "extract_and_recreate" ]; then
+          echo "Source RG: ${{ parameters.sourceResourceGroup }}"
+          echo "Recreated as: $ENV_NAME"
+        else
+          echo "Environment: $ENV_NAME"
+        fi
+        echo "Application Gateway: $(APP_GATEWAY_URL)"
+        echo "Load Balancer: $(LOAD_BALANCER_URL)"
+        echo "======================="
       displayName: 'Infrastructure Health Check and Testing'
 
 - stage: Notification
@@ -556,6 +708,9 @@ stages:
         ENV_NAME="${{ parameters.targetEnvironment }}"
         if [ "${{ parameters.operation }}" = "create_new" ]; then
           ENV_NAME="${{ parameters.newEnvironmentName }}"
+        elif [ "${{ parameters.operation }}" = "extract_and_recreate" ]; then
+          SOURCE_RG="${{ parameters.sourceResourceGroup }}"
+          ENV_NAME=$(echo "$SOURCE_RG" | sed 's/rg-//' | sed 's/myapp-//' | sed 's/-.*$//')-replica
         fi
         
         STATUS="✓ Success"
@@ -567,34 +722,71 @@ stages:
         echo "           DEPLOYMENT SUMMARY"
         echo "================================================="
         echo "Status: $STATUS"
-        echo "Environment: $ENV_NAME"
         echo "Operation: ${{ parameters.operation }}"
+        
+        if [ "${{ parameters.operation }}" = "extract_and_recreate" ]; then
+          echo "Source Resource Group: ${{ parameters.sourceResourceGroup }}"
+          echo "Recreated as Environment: $ENV_NAME"
+          echo "New Resource Group: ${{ parameters.resourceGroupName }}-$ENV_NAME"
+        else
+          echo "Environment: $ENV_NAME"
+          echo "Resource Group: ${{ parameters.resourceGroupName }}-$ENV_NAME"
+        fi
+        
         echo "Infrastructure Method: ${{ parameters.infrastructureMethod }}"
-        echo "VM Count: ${{ parameters.vmCount }}"
-        echo "VM Size: ${{ parameters.vmSize }}"
-        echo "App Gateway Tier: ${{ parameters.appGatewayTier }}"
+        
+        # Show VM configuration
+        if [ "${{ parameters.operation }}" = "extract_and_recreate" ]; then
+          echo "VM Configuration: Auto-detected from source"
+        else
+          echo "VM Count: ${{ parameters.vmCount }}"
+          echo "VM Size: ${{ parameters.vmSize }}"
+          echo "App Gateway Tier: ${{ parameters.appGatewayTier }}"
+        fi
+        
         echo ""
         echo "URLs:"
         [ ! -z "$(APP_GATEWAY_URL)" ] && echo "  🌐 Application Gateway: $(APP_GATEWAY_URL)"
         [ ! -z "$(LOAD_BALANCER_URL)" ] && echo "  ⚖️  Load Balancer: $(LOAD_BALANCER_URL)"
+        
         echo ""
         echo "SSH Access:"
         if [ ! -z "$(LOAD_BALANCER_FQDN)" ]; then
-          for i in $(seq 0 $((${parameters.vmCount} - 1))); do
+          # Determine VM count for SSH display
+          VM_COUNT_FOR_SSH=3  # Default
+          if [ "${{ parameters.operation }}" != "extract_and_recreate" ] && [ ${{ parameters.vmCount }} -gt 0 ]; then
+            VM_COUNT_FOR_SSH=${{ parameters.vmCount }}
+          fi
+          
+          for i in $(seq 0 $((VM_COUNT_FOR_SSH - 1))); do
             PORT=$((2200 + i))
             echo "  🖥️  VM$i: ssh $(vmAdminUsername)@$(LOAD_BALANCER_FQDN) -p $PORT"
           done
         fi
+        
         echo ""
         echo "Next Steps:"
         echo "  1. Verify applications are running correctly"
         echo "  2. Run additional tests if needed"
         echo "  3. Update DNS records if required"
         echo "  4. Monitor resource utilization"
+        
+        if [ "${{ parameters.operation }}" = "extract_and_recreate" ]; then
+          echo ""
+          echo "Migration Notes:"
+          echo "  • Original resource group preserved: ${{ parameters.sourceResourceGroup }}"
+          echo "  • New infrastructure follows IaC best practices"
+          echo "  • Review and cleanup original resources when ready"
+        fi
+        
         echo "================================================="
         
         # Here you could add Teams/Slack/Email notifications
         # Example for Teams webhook:
-        # curl -H "Content-Type: application/json" -d '{"text":"Deployment $STATUS for $ENV_NAME"}' $TEAMS_WEBHOOK
+        # if [ ! -z "$TEAMS_WEBHOOK_URL" ]; then
+        #   curl -H "Content-Type: application/json" \
+        #     -d "{\"text\":\"Deployment $STATUS for $ENV_NAME\"}" \
+        #     "$TEAMS_WEBHOOK_URL"
+        # fi
         
       displayName: 'Display Deployment Summary'
