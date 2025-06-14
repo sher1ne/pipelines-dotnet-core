@@ -1,3 +1,4 @@
+# Azure DevOps Pipeline for Environment Management (No Terraform)
 trigger: none
 
 parameters:
@@ -16,7 +17,6 @@ parameters:
   default: 'dev'
   values:
   - dev
-  - uat
   - staging
   - prod
 
@@ -26,7 +26,6 @@ parameters:
   default: 'staging'
   values:
   - dev
-  - uat
   - staging
   - prod
   - feature-branch
@@ -53,7 +52,7 @@ parameters:
 variables:
 - group: 'environment-secrets'
 - name: subscriptionServiceConnection
-  value: 'azure-service-connection-v2'
+  value: 'azure-service-connection-v2'  # UPDATE THIS TO MATCH YOUR SERVICE CONNECTION NAME
 - name: location
   value: 'East US'
 
@@ -149,7 +148,7 @@ stages:
                       --template-file bicep/main.bicep \
                       --parameters environmentName=$(ENV_NAME) \
                       --parameters location="$(location)" \
-                      --verbose --debug
+                      --verbose
                     
                     DEPLOYMENT_STATUS=$?
                     
