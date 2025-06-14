@@ -143,7 +143,7 @@ stages:
                     --name "$DEPLOYMENT_NAME" \
                     --parameters environmentName=$(ENV_NAME) \
                     --parameters location="$(location)" \
-                    --verbose --debug
+                    --verbose
                   
                   DEPLOYMENT_STATUS=$?
                   
@@ -209,26 +209,40 @@ stages:
               echo "##vso[task.setvariable variable=RESOURCE_GROUP_NAME]${{ parameters.resourceGroupName }}-$ENV_NAME"
             displayName: 'Set Environment Variables'
           
-          # Download artifacts based on operation type
+          # Download artifacts based on operation type (OPTIONAL - only if you have build artifacts)
           - ${{ if eq(parameters.operation, 'promote') }}:
-            - task: DownloadBuildArtifacts@0
-              displayName: 'Download Source Environment Artifacts'
-              inputs:
-                buildType: 'specific'
-                project: '$(System.TeamProject)'
-                pipeline: 'main-build-pipeline'
-                buildVersionToDownload: 'latestFromBranch'
-                branchName: 'refs/heads/main'
-                downloadType: 'specific'
-                downloadPath: '$(System.ArtifactsDirectory)'
+            - script: |
+                echo "Promoting from ${{ parameters.sourceEnvironment }} to ${{ parameters.targetEnvironment }}"
+                echo "Note: Artifact download step disabled - no build pipeline configured"
+                echo "To enable artifact downloads, update the pipeline name in the YAML"
+              displayName: 'Promotion Info (Artifacts Disabled)'
+            
+            # Uncomment and update this section when you have a build pipeline:
+            # - task: DownloadBuildArtifacts@0
+            #   displayName: 'Download Source Environment Artifacts'
+            #   inputs:
+            #     buildType: 'specific'
+            #     project: '$(System.TeamProject)'
+            #     pipeline: 'YOUR-ACTUAL-BUILD-PIPELINE-NAME'  # UPDATE THIS
+            #     buildVersionToDownload: 'latestFromBranch'
+            #     branchName: 'refs/heads/main'
+            #     downloadType: 'specific'
+            #     downloadPath: '$(System.ArtifactsDirectory)'
           
           - ${{ if eq(parameters.operation, 'create_new') }}:
-            - task: DownloadBuildArtifacts@0
-              displayName: 'Download Latest Artifacts'
-              inputs:
-                buildType: 'current'
-                downloadType: 'specific'
-                downloadPath: '$(System.ArtifactsDirectory)'
+            - script: |
+                echo "Creating new environment: ${{ parameters.newEnvironmentName }}"
+                echo "Note: Artifact download step disabled - no build pipeline configured"
+                echo "To enable artifact downloads, update the pipeline name in the YAML"
+              displayName: 'New Environment Info (Artifacts Disabled)'
+            
+            # Uncomment and update this section when you have a build pipeline:
+            # - task: DownloadBuildArtifacts@0
+            #   displayName: 'Download Latest Artifacts'
+            #   inputs:
+            #     buildType: 'current'
+            #     downloadType: 'specific'
+            #     downloadPath: '$(System.ArtifactsDirectory)'
           
           # Deploy application
           - task: AzureCLI@2
@@ -243,14 +257,28 @@ stages:
                 
                 # Since your current Bicep template only creates a storage account,
                 # this is a placeholder for future application deployment
+                echo "Storage Account: $(STORAGE_ACCOUNT_NAME)"
                 
-                # Example: If you had an App Service in your Bicep template:
-                # az webapp deployment source config-zip \
-                #   --resource-group $(RESOURCE_GROUP_NAME) \
+                # Example deployment steps (uncomment when you have actual app artifacts):
+                
+                # For ZIP deployment to App Service:
+                # if [ -f "$(System.ArtifactsDirectory)/drop/app.zip" ]; then
+                #   echo "Deploying ZIP package to App Service"
+                #   az webapp deployment source config-zip \
+                #     --resource-group $(RESOURCE_GROUP_NAME) \
+                #     --name "myapp-$(ENV_NAME)" \
+                #     --src "$(System.ArtifactsDirectory)/drop/app.zip"
+                # else
+                #   echo "No ZIP artifact found for deployment"
+                # fi
+                
+                # For container deployment:
+                # az webapp config container set \
                 #   --name "myapp-$(ENV_NAME)" \
-                #   --src "$(System.ArtifactsDirectory)/drop/app.zip"
+                #   --resource-group $(RESOURCE_GROUP_NAME) \
+                #   --docker-custom-image-name "myregistry.azurecr.io/myapp:latest"
                 
-                # Example: Configure app settings if you had a web app:
+                # Configure app settings (if you had a web app):
                 # az webapp config appsettings set \
                 #   --resource-group $(RESOURCE_GROUP_NAME) \
                 #   --name "myapp-$(ENV_NAME)" \
@@ -259,7 +287,6 @@ stages:
                 #     STORAGE_ACCOUNT="$(STORAGE_ACCOUNT_NAME)"
                 
                 echo "✓ Application deployment completed"
-                echo "Storage Account: $(STORAGE_ACCOUNT_NAME)"
 
 - stage: Testing
   displayName: 'Post-Deployment Testing'
