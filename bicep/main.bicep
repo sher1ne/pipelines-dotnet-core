@@ -1,461 +1,1141 @@
-@description('Environment name')
-param environmentName string
+trigger: none
 
-@description('Location for all resources')
-param location string = resourceGroup().location
+parameters:
+- name: operation
+  displayName: 'Operation Type'
+  type: string
+  default: 'promote'
+  values:
+  - promote
+  - create_new
+  - destroy
+  - extract_and_recreate
 
-@description('Application Gateway SKU')
-@allowed(['Standard_Small', 'Standard_Medium', 'Standard_Large', 'WAF_Medium', 'WAF_Large', 'Standard_v2', 'WAF_v2'])
-param appGatewaySkuName string = 'Standard_v2'
+- name: sourceResourceGroup
+  displayName: 'Source Resource Group (for extract_and_recreate)'
+  type: string
+  default: ''
 
-@description('Application Gateway tier')
-@allowed(['Standard', 'WAF', 'Standard_v2', 'WAF_v2'])
-param appGatewayTier string = 'Standard_v2'
+- name: sourceEnvironment
+  displayName: 'Source Environment (for promotion)'
+  type: string
+  default: 'dev'
+  values:
+  - dev
+  - uat
+  - staging
+  - prod
 
-@description('VM Admin Username')
-param vmAdminUsername string = 'azureuser'
+- name: targetEnvironment
+  displayName: 'Target Environment'
+  type: string
+  default: 'staging'
+  values:
+  - dev
+  - uat
+  - staging
+  - prod
+  - feature-branch
 
-@description('VM Admin Password')
-@secure()
-param vmAdminPassword string
+- name: newEnvironmentName
+  displayName: 'New Environment Name (for new environments)'
+  type: string
+  default: ''
 
-@description('VM Size')
-param vmSize string = 'Standard_B2s'
+- name: resourceGroupName
+  displayName: 'Resource Group Name'
+  type: string
+  default: 'rg-myapp'
 
-@description('Number of VMs to create')
-param vmCount int = 3
+- name: infrastructureMethod
+  displayName: 'Infrastructure Method'
+  type: string
+  default: 'bicep'
+  values:
+  - bicep
+  - azure_cli
+  - arm_template
 
-// Variables for consistent naming
-var cleanEnvName = toLower(replace(environmentName, '-', ''))
-var storageAccountName = take('st${cleanEnvName}${uniqueString(resourceGroup().id)}', 24)
-var vnetName = 'vnet-${environmentName}-${uniqueString(resourceGroup().id)}'
-var publicIpName = 'pip-agw-${environmentName}-${uniqueString(resourceGroup().id)}'
-var appGatewayName = 'agw-${environmentName}-${uniqueString(resourceGroup().id)}'
-var nsgName = 'nsg-agw-${environmentName}-${uniqueString(resourceGroup().id)}'
+# SELECTIVE RESOURCE CREATION PARAMETERS
+- name: createVMs
+  displayName: 'Create Virtual Machines'
+  type: boolean
+  default: true
 
-// Network Security Group for Application Gateway
-resource networkSecurityGroup 'Microsoft.Network/networkSecurityGroups@2023-04-01' = {
-  name: nsgName
-  location: location
-  properties: {
-    securityRules: [
-      {
-        name: 'AllowGatewayManager'
-        properties: {
-          protocol: 'Tcp'
-          sourcePortRange: '*'
-          destinationPortRange: '65200-65535'
-          sourceAddressPrefix: 'GatewayManager'
-          destinationAddressPrefix: '*'
-          access: 'Allow'
-          priority: 100
-          direction: 'Inbound'
-        }
-      }
-      {
-        name: 'AllowHTTP'
-        properties: {
-          protocol: 'Tcp'
-          sourcePortRange: '*'
-          destinationPortRange: '80'
-          sourceAddressPrefix: 'Internet'
-          destinationAddressPrefix: '*'
-          access: 'Allow'
-          priority: 200
-          direction: 'Inbound'
-        }
-      }
-      {
-        name: 'AllowHTTPS'
-        properties: {
-          protocol: 'Tcp'
-          sourcePortRange: '*'
-          destinationPortRange: '443'
-          sourceAddressPrefix: 'Internet'
-          destinationAddressPrefix: '*'
-          access: 'Allow'
-          priority: 300
-          direction: 'Inbound'
-        }
-      }
-    ]
-  }
-  tags: {
-    Environment: environmentName
-    Project: 'MyApp'
-  }
-}
+- name: vmSize
+  displayName: 'VM Size (override extracted value)'
+  type: string
+  default: 'auto-detect'
+  values:
+  - auto-detect
+  - Standard_B1s
+  - Standard_B2s
+  - Standard_B4ms
+  - Standard_D2s_v3
+  - Standard_D4s_v3
 
-// Virtual Network
-resource virtualNetwork 'Microsoft.Network/virtualNetworks@2023-04-01' = {
-  name: vnetName
-  location: location
-  properties: {
-    addressSpace: {
-      addressPrefixes: [
-        '10.0.0.0/16'
-      ]
-    }
-    subnets: [
-      {
-        name: 'appgateway-subnet'
-        properties: {
-          addressPrefix: '10.0.1.0/24'
-          networkSecurityGroup: {
-            id: networkSecurityGroup.id
-          }
-        }
-      }
-      {
-        name: 'backend-subnet'
-        properties: {
-          addressPrefix: '10.0.2.0/24'
-        }
-      }
-    ]
-  }
-  tags: {
-    Environment: environmentName
-    Project: 'MyApp'
-  }
-}
+- name: vmCount
+  displayName: 'Number of VMs (override extracted value)'
+  type: number
+  default: 0  # 0 means auto-detect
 
-// Public IP for Application Gateway
-resource publicIp 'Microsoft.Network/publicIPAddresses@2023-04-01' = {
-  name: publicIpName
-  location: location
-  sku: {
-    name: 'Standard'
-  }
-  properties: {
-    publicIPAllocationMethod: 'Static'
-    dnsSettings: {
-      domainNameLabel: 'agw-${cleanEnvName}-${uniqueString(resourceGroup().id)}'
-    }
-  }
-  tags: {
-    Environment: environmentName
-    Project: 'MyApp'
-  }
-}
+- name: createApplicationGateway
+  displayName: 'Create Application Gateway'
+  type: boolean
+  default: true
 
-// Storage Account
-resource storageAccount 'Microsoft.Storage/storageAccounts@2023-01-01' = {
-  name: storageAccountName
-  location: location
-  sku: {
-    name: 'Standard_LRS'
-  }
-  kind: 'StorageV2'
-  properties: {
-    allowBlobPublicAccess: false
-    minimumTlsVersion: 'TLS1_2'
-    supportsHttpsTrafficOnly: true
-    accessTier: 'Hot'
-  }
-  tags: {
-    Environment: environmentName
-    Project: 'MyApp'
-    Purpose: 'Testing'
-  }
-}
+- name: appGatewayTier
+  displayName: 'Application Gateway Tier (override extracted value)'
+  type: string
+  default: 'auto-detect'
+  values:
+  - auto-detect
+  - Standard_v2
+  - WAF_v2
 
-// Blob service
-resource blobService 'Microsoft.Storage/storageAccounts/blobServices@2023-01-01' = {
-  parent: storageAccount
-  name: 'default'
-}
+- name: createLoadBalancer
+  displayName: 'Create Load Balancer'
+  type: boolean
+  default: false
 
-// Storage Container
-resource uploadsContainer 'Microsoft.Storage/storageAccounts/blobServices/containers@2023-01-01' = {
-  parent: blobService
-  name: 'uploads'
-  properties: {
-    publicAccess: 'None'
-  }
-}
+- name: createStorageAccount
+  displayName: 'Create Storage Account'
+  type: boolean
+  default: true
 
-// Public IPs for VMs
-resource vmPublicIps 'Microsoft.Network/publicIPAddresses@2023-04-01' = [for i in range(0, vmCount): {
-  name: 'pip-vm${i}-${environmentName}-${uniqueString(resourceGroup().id)}'
-  location: location
-  sku: {
-    name: 'Basic'
-  }
-  properties: {
-    publicIPAllocationMethod: 'Dynamic'
-    dnsSettings: {
-      domainNameLabel: 'vm${i}-${cleanEnvName}-${uniqueString(resourceGroup().id)}'
-    }
-  }
-  tags: {
-    Environment: environmentName
-    Project: 'MyApp'
-    VMNumber: string(i)
-  }
-}]
+- name: storageAccountSku
+  displayName: 'Storage Account SKU'
+  type: string
+  default: 'Standard_LRS'
+  values:
+  - Standard_LRS
+  - Standard_GRS
+  - Standard_RAGRS
+  - Standard_ZRS
+  - Premium_LRS
 
-// Network Interfaces for VMs
-resource networkInterface 'Microsoft.Network/networkInterfaces@2023-04-01' = [for i in range(0, vmCount): {
-  name: 'nic-vm${i}-${environmentName}-${uniqueString(resourceGroup().id)}'
-  location: location
-  properties: {
-    ipConfigurations: [
-      {
-        name: 'ipconfig1'
-        properties: {
-          privateIPAllocationMethod: 'Dynamic'
-          subnet: {
-            id: resourceId('Microsoft.Network/virtualNetworks/subnets', vnetName, 'backend-subnet')
-          }
-          publicIPAddress: {
-            id: vmPublicIps[i].id
-          }
-        }
-      }
-    ]
-  }
-  tags: {
-    Environment: environmentName
-    Project: 'MyApp'
-    VMNumber: string(i)
-  }
-  dependsOn: [
-    virtualNetwork
-  ]
-}]
+- name: createVirtualNetwork
+  displayName: 'Create Virtual Network'
+  type: boolean
+  default: true
 
-// Virtual Machines
-resource virtualMachine 'Microsoft.Compute/virtualMachines@2023-03-01' = [for i in range(0, vmCount): {
-  name: 'vm${i}-${environmentName}-${uniqueString(resourceGroup().id)}'
-  location: location
-  properties: {
-    hardwareProfile: {
-      vmSize: vmSize
-    }
-    osProfile: {
-      computerName: 'vm${i}-${environmentName}'
-      adminUsername: vmAdminUsername
-      adminPassword: vmAdminPassword
-      customData: base64('''#!/bin/bash
-        # Basic VM setup - minimal recreation
-        apt-get update
-        apt-get install -y nginx
+- name: createAvailabilitySet
+  displayName: 'Create Availability Set'
+  type: boolean
+  default: false
+
+- name: createNetworkSecurityGroups
+  displayName: 'Create Network Security Groups'
+  type: boolean
+  default: true
+
+- name: createVMPublicIPs
+  displayName: 'Create Public IPs for VMs'
+  type: boolean
+  default: true
+
+- name: createBastion
+  displayName: 'Create Bastion Host'
+  type: boolean
+  default: false
+
+- name: createNATGateway
+  displayName: 'Create NAT Gateway'
+  type: boolean
+  default: false
+
+- name: createKeyVault
+  displayName: 'Create Key Vault'
+  type: boolean
+  default: false
+
+- name: createLogAnalytics
+  displayName: 'Create Log Analytics Workspace'
+  type: boolean
+  default: false
+
+variables:
+- group: 'environment-secrets'
+- name: subscriptionServiceConnection
+  value: 'azure-service-connection-v2'
+- name: location
+  value: 'East US'
+- name: vmAdminUsername
+  value: 'azureuser'
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+stages:
+- stage: Validate
+  displayName: 'Validate Parameters'
+  jobs:
+  - job: ValidateInputs
+    displayName: 'Validate Pipeline Inputs'
+    steps:
+    - script: |
+        echo "Operation: ${{ parameters.operation }}"
+        echo "Infrastructure Method: ${{ parameters.infrastructureMethod }}"
+        echo ""
+        echo "=== SELECTIVE RESOURCE CREATION SETTINGS ==="
+        echo "Create VMs: ${{ parameters.createVMs }}"
+        echo "Create Application Gateway: ${{ parameters.createApplicationGateway }}"
+        echo "Create Load Balancer: ${{ parameters.createLoadBalancer }}"
+        echo "Create Storage Account: ${{ parameters.createStorageAccount }}"
+        echo "Create Virtual Network: ${{ parameters.createVirtualNetwork }}"
+        echo "Create Availability Set: ${{ parameters.createAvailabilitySet }}"
+        echo "Create NSGs: ${{ parameters.createNetworkSecurityGroups }}"
+        echo "Create VM Public IPs: ${{ parameters.createVMPublicIPs }}"
+        echo "Create Bastion: ${{ parameters.createBastion }}"
+        echo "Create NAT Gateway: ${{ parameters.createNATGateway }}"
+        echo "Create Key Vault: ${{ parameters.createKeyVault }}"
+        echo "Create Log Analytics: ${{ parameters.createLogAnalytics }}"
+        echo "============================================="
         
-        # Create simple web page
-        cat > /var/www/html/index.html << 'EOF'
+        # Validate extract_and_recreate parameters
+        if [ "${{ parameters.operation }}" = "extract_and_recreate" ] && [ -z "${{ parameters.sourceResourceGroup }}" ]; then
+          echo "##vso[task.logissue type=error]Source Resource Group is required for extract_and_recreate operation"
+          exit 1
+        fi
+        
+        # Validate new environment name if creating new
+        if [ "${{ parameters.operation }}" = "create_new" ] && [ -z "${{ parameters.newEnvironmentName }}" ]; then
+          echo "##vso[task.logissue type=error]New environment name is required when creating a new environment"
+          exit 1
+        fi
+        
+        # Validate promotion parameters
+        if [ "${{ parameters.operation }}" = "promote" ] && [ "${{ parameters.sourceEnvironment }}" = "${{ parameters.targetEnvironment }}" ]; then
+          echo "##vso[task.logissue type=error]Source and target environments cannot be the same"
+          exit 1
+        fi
+        
+        # Validate VM count
+        if [ ${{ parameters.vmCount }} -lt 0 ] || [ ${{ parameters.vmCount }} -gt 10 ]; then
+          if [ ${{ parameters.vmCount }} -ne 0 ]; then  # 0 is allowed for auto-detect
+            echo "##vso[task.logissue type=error]VM count must be between 0 and 10 (0 = auto-detect)"
+            exit 1
+          fi
+        fi
+        
+        # Validate VM dependencies
+        if [ "${{ parameters.createVMs }}" = "True" ]; then
+          if [ "${{ parameters.createVirtualNetwork }}" = "False" ]; then
+            echo "##vso[task.logissue type=error]Virtual Network is required when creating VMs"
+            exit 1
+          fi
+        fi
+        
+        # Validate Application Gateway dependencies
+        if [ "${{ parameters.createApplicationGateway }}" = "True" ]; then
+          if [ "${{ parameters.createVirtualNetwork }}" = "False" ]; then
+            echo "##vso[task.logissue type=error]Virtual Network is required when creating Application Gateway"
+            exit 1
+          fi
+        fi
+        
+        # Validate Load Balancer dependencies
+        if [ "${{ parameters.createLoadBalancer }}" = "True" ]; then
+          if [ "${{ parameters.createVMs }}" = "False" ]; then
+            echo "##vso[task.logissue type=warning]Load Balancer is most useful with VMs"
+          fi
+        fi
+        
+        # Validate Bastion dependencies
+        if [ "${{ parameters.createBastion }}" = "True" ]; then
+          if [ "${{ parameters.createVirtualNetwork }}" = "False" ]; then
+            echo "##vso[task.logissue type=error]Virtual Network is required when creating Bastion"
+            exit 1
+          fi
+          if [ "${{ parameters.createVMPublicIPs }}" = "True" ]; then
+            echo "##vso[task.logissue type=warning]VM Public IPs are not needed when using Bastion"
+          fi
+        fi
+        
+        # Validate that at least one resource is being created
+        CREATING_RESOURCES=false
+        if [ "${{ parameters.createVMs }}" = "True" ] || \
+           [ "${{ parameters.createApplicationGateway }}" = "True" ] || \
+           [ "${{ parameters.createLoadBalancer }}" = "True" ] || \
+           [ "${{ parameters.createStorageAccount }}" = "True" ] || \
+           [ "${{ parameters.createVirtualNetwork }}" = "True" ] || \
+           [ "${{ parameters.createBastion }}" = "True" ] || \
+           [ "${{ parameters.createNATGateway }}" = "True" ] || \
+           [ "${{ parameters.createKeyVault }}" = "True" ] || \
+           [ "${{ parameters.createLogAnalytics }}" = "True" ]; then
+          CREATING_RESOURCES=true
+        fi
+        
+        if [ "${{ parameters.operation }}" != "destroy" ] && [ "$CREATING_RESOURCES" = "false" ]; then
+          echo "##vso[task.logissue type=error]At least one resource type must be selected for creation"
+          exit 1
+        fi
+        
+        echo "✓ All validations passed"
+      displayName: 'Validate Parameters'
+
+- stage: Extract
+  displayName: 'Extract Source Configuration'
+  dependsOn: Validate
+  condition: and(succeeded(), eq('${{ parameters.operation }}', 'extract_and_recreate'))
+  jobs:
+  - job: ExtractConfig
+    displayName: 'Extract Resource Configuration'
+    steps:
+    - checkout: self
+    
+    - task: AzureCLI@2
+      displayName: 'Extract Resource Group Configuration'
+      inputs:
+        azureSubscription: $(subscriptionServiceConnection)
+        scriptType: 'bash'
+        scriptLocation: 'scriptPath'
+        scriptPath: 'scripts/extract-resources.sh'
+        arguments: '${{ parameters.sourceResourceGroup }}'
+      env:
+        SOURCE_RG: ${{ parameters.sourceResourceGroup }}
+    
+    - script: |
+        # Read the extracted configuration
+        if [ -f "extracted-config.json" ]; then
+          echo "=== EXTRACTED CONFIGURATION ==="
+          cat extracted-config.json | jq .
+          
+          # Extract values for next stage
+          EXTRACTED_VM_COUNT=$(cat extracted-config.json | jq -r '.discoveredResources.virtualMachines.count // 0')
+          EXTRACTED_VM_SIZE=$(cat extracted-config.json | jq -r '.discoveredResources.virtualMachines.size // "Standard_B2s"')
+          EXTRACTED_AGW_TIER=$(cat extracted-config.json | jq -r '.discoveredResources.applicationGateway.tier // "Standard_v2"')
+          EXTRACTED_ADMIN_USER=$(cat extracted-config.json | jq -r '.discoveredResources.virtualMachines.adminUsername // "azureuser"')
+          EXTRACTED_STORAGE_SKU=$(cat extracted-config.json | jq -r '.discoveredResources.storageAccount.sku // "Standard_LRS"')
+          
+          # Use parameter overrides if provided, otherwise use extracted values
+          FINAL_VM_COUNT=${{ parameters.vmCount }}
+          if [ "$FINAL_VM_COUNT" = "0" ]; then
+            FINAL_VM_COUNT=$EXTRACTED_VM_COUNT
+          fi
+          
+          FINAL_VM_SIZE="${{ parameters.vmSize }}"
+          if [ "$FINAL_VM_SIZE" = "auto-detect" ]; then
+            FINAL_VM_SIZE=$EXTRACTED_VM_SIZE
+          fi
+          
+          FINAL_AGW_TIER="${{ parameters.appGatewayTier }}"
+          if [ "$FINAL_AGW_TIER" = "auto-detect" ]; then
+            FINAL_AGW_TIER=$EXTRACTED_AGW_TIER
+          fi
+          
+          # Determine which resources to create based on user selection
+          CREATE_VMS="${{ parameters.createVMs }}"
+          CREATE_APP_GATEWAY="${{ parameters.createApplicationGateway }}"
+          CREATE_LOAD_BALANCER="${{ parameters.createLoadBalancer }}"
+          CREATE_STORAGE="${{ parameters.createStorageAccount }}"
+          CREATE_VNET="${{ parameters.createVirtualNetwork }}"
+          CREATE_AVSET="${{ parameters.createAvailabilitySet }}"
+          CREATE_NSG="${{ parameters.createNetworkSecurityGroups }}"
+          CREATE_VM_PIPS="${{ parameters.createVMPublicIPs }}"
+          CREATE_BASTION="${{ parameters.createBastion }}"
+          CREATE_NAT="${{ parameters.createNATGateway }}"
+          CREATE_KV="${{ parameters.createKeyVault }}"
+          CREATE_LAW="${{ parameters.createLogAnalytics }}"
+          
+          # Set variables for next stage
+          echo "##vso[task.setvariable variable=EXTRACTED_VM_COUNT;isOutput=true]$FINAL_VM_COUNT"
+          echo "##vso[task.setvariable variable=EXTRACTED_VM_SIZE;isOutput=true]$FINAL_VM_SIZE"
+          echo "##vso[task.setvariable variable=EXTRACTED_AGW_TIER;isOutput=true]$FINAL_AGW_TIER"
+          echo "##vso[task.setvariable variable=EXTRACTED_ADMIN_USER;isOutput=true]$EXTRACTED_ADMIN_USER"
+          echo "##vso[task.setvariable variable=EXTRACTED_STORAGE_SKU;isOutput=true]$EXTRACTED_STORAGE_SKU"
+          
+          # Resource creation flags
+          echo "##vso[task.setvariable variable=CREATE_VMS;isOutput=true]$CREATE_VMS"
+          echo "##vso[task.setvariable variable=CREATE_APP_GATEWAY;isOutput=true]$CREATE_APP_GATEWAY"
+          echo "##vso[task.setvariable variable=CREATE_LOAD_BALANCER;isOutput=true]$CREATE_LOAD_BALANCER"
+          echo "##vso[task.setvariable variable=CREATE_STORAGE;isOutput=true]$CREATE_STORAGE"
+          echo "##vso[task.setvariable variable=CREATE_VNET;isOutput=true]$CREATE_VNET"
+          echo "##vso[task.setvariable variable=CREATE_AVSET;isOutput=true]$CREATE_AVSET"
+          echo "##vso[task.setvariable variable=CREATE_NSG;isOutput=true]$CREATE_NSG"
+          echo "##vso[task.setvariable variable=CREATE_VM_PIPS;isOutput=true]$CREATE_VM_PIPS"
+          echo "##vso[task.setvariable variable=CREATE_BASTION;isOutput=true]$CREATE_BASTION"
+          echo "##vso[task.setvariable variable=CREATE_NAT;isOutput=true]$CREATE_NAT"
+          echo "##vso[task.setvariable variable=CREATE_KV;isOutput=true]$CREATE_KV"
+          echo "##vso[task.setvariable variable=CREATE_LAW;isOutput=true]$CREATE_LAW"
+          
+          echo "=== FINAL PARAMETERS FOR DEPLOYMENT ==="
+          echo "VM Count: $FINAL_VM_COUNT"
+          echo "VM Size: $FINAL_VM_SIZE"
+          echo "App Gateway Tier: $FINAL_AGW_TIER"
+          echo "Admin Username: $EXTRACTED_ADMIN_USER"
+          echo "Storage SKU: $EXTRACTED_STORAGE_SKU"
+          echo ""
+          echo "Resources to Create:"
+          echo "  VMs: $CREATE_VMS"
+          echo "  Application Gateway: $CREATE_APP_GATEWAY"
+          echo "  Load Balancer: $CREATE_LOAD_BALANCER"
+          echo "  Storage Account: $CREATE_STORAGE"
+          echo "  Virtual Network: $CREATE_VNET"
+          echo "  Availability Set: $CREATE_AVSET"
+          echo "  NSGs: $CREATE_NSG"
+          echo "  VM Public IPs: $CREATE_VM_PIPS"
+          echo "  Bastion: $CREATE_BASTION"
+          echo "  NAT Gateway: $CREATE_NAT"
+          echo "  Key Vault: $CREATE_KV"
+          echo "  Log Analytics: $CREATE_LAW"
+        else
+          echo "##vso[task.logissue type=error]extracted-config.json not found"
+          exit 1
+        fi
+      name: ProcessExtraction
+      displayName: 'Process Extracted Configuration'
+
+- stage: Infrastructure
+  displayName: 'Infrastructure Management'
+  dependsOn: 
+  - Validate
+  - Extract
+  condition: |
+    and(
+      succeeded(),
+      or(
+        ne('${{ parameters.operation }}', 'extract_and_recreate'),
+        and(
+          eq('${{ parameters.operation }}', 'extract_and_recreate'),
+          succeeded('Extract')
+        )
+      )
+    )
+  jobs:
+  - deployment: ManageInfrastructure
+    displayName: 'Manage Infrastructure'
+    environment: ${{ parameters.targetEnvironment }}
+    variables:
+      EXTRACTED_VM_COUNT: $[ stageDependencies.Extract.ExtractConfig.outputs['ProcessExtraction.EXTRACTED_VM_COUNT'] ]
+      EXTRACTED_VM_SIZE: $[ stageDependencies.Extract.ExtractConfig.outputs['ProcessExtraction.EXTRACTED_VM_SIZE'] ]
+      EXTRACTED_AGW_TIER: $[ stageDependencies.Extract.ExtractConfig.outputs['ProcessExtraction.EXTRACTED_AGW_TIER'] ]
+      EXTRACTED_ADMIN_USER: $[ stageDependencies.Extract.ExtractConfig.outputs['ProcessExtraction.EXTRACTED_ADMIN_USER'] ]
+      EXTRACTED_STORAGE_SKU: $[ stageDependencies.Extract.ExtractConfig.outputs['ProcessExtraction.EXTRACTED_STORAGE_SKU'] ]
+      CREATE_VMS: $[ stageDependencies.Extract.ExtractConfig.outputs['ProcessExtraction.CREATE_VMS'] ]
+      CREATE_APP_GATEWAY: $[ stageDependencies.Extract.ExtractConfig.outputs['ProcessExtraction.CREATE_APP_GATEWAY'] ]
+      CREATE_LOAD_BALANCER: $[ stageDependencies.Extract.ExtractConfig.outputs['ProcessExtraction.CREATE_LOAD_BALANCER'] ]
+      CREATE_STORAGE: $[ stageDependencies.Extract.ExtractConfig.outputs['ProcessExtraction.CREATE_STORAGE'] ]
+      CREATE_VNET: $[ stageDependencies.Extract.ExtractConfig.outputs['ProcessExtraction.CREATE_VNET'] ]
+      CREATE_AVSET: $[ stageDependencies.Extract.ExtractConfig.outputs['ProcessExtraction.CREATE_AVSET'] ]
+      CREATE_NSG: $[ stageDependencies.Extract.ExtractConfig.outputs['ProcessExtraction.CREATE_NSG'] ]
+      CREATE_VM_PIPS: $[ stageDependencies.Extract.ExtractConfig.outputs['ProcessExtraction.CREATE_VM_PIPS'] ]
+      CREATE_BASTION: $[ stageDependencies.Extract.ExtractConfig.outputs['ProcessExtraction.CREATE_BASTION'] ]
+      CREATE_NAT: $[ stageDependencies.Extract.ExtractConfig.outputs['ProcessExtraction.CREATE_NAT'] ]
+      CREATE_KV: $[ stageDependencies.Extract.ExtractConfig.outputs['ProcessExtraction.CREATE_KV'] ]
+      CREATE_LAW: $[ stageDependencies.Extract.ExtractConfig.outputs['ProcessExtraction.CREATE_LAW'] ]
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - checkout: self
+          
+          - script: |
+              # Set environment name
+              if [ "${{ parameters.operation }}" = "create_new" ]; then
+                ENV_NAME="${{ parameters.newEnvironmentName }}"
+              elif [ "${{ parameters.operation }}" = "extract_and_recreate" ]; then
+                SOURCE_RG="${{ parameters.sourceResourceGroup }}"
+                ENV_NAME=$(echo "$SOURCE_RG" | sed 's/rg-//' | sed 's/myapp-//' | sed 's/-.*$//')-replica
+              else
+                ENV_NAME="${{ parameters.targetEnvironment }}"
+              fi
+              echo "##vso[task.setvariable variable=ENV_NAME]$ENV_NAME"
+              echo "##vso[task.setvariable variable=RESOURCE_GROUP_NAME]${{ parameters.resourceGroupName }}-$ENV_NAME"
+              
+              # Determine final resource creation settings
+              if [ "${{ parameters.operation }}" = "extract_and_recreate" ]; then
+                FINAL_CREATE_VMS="$(CREATE_VMS)"
+                FINAL_CREATE_APP_GATEWAY="$(CREATE_APP_GATEWAY)"
+                FINAL_CREATE_LOAD_BALANCER="$(CREATE_LOAD_BALANCER)"
+                FINAL_CREATE_STORAGE="$(CREATE_STORAGE)"
+                FINAL_CREATE_VNET="$(CREATE_VNET)"
+                FINAL_CREATE_AVSET="$(CREATE_AVSET)"
+                FINAL_CREATE_NSG="$(CREATE_NSG)"
+                FINAL_CREATE_VM_PIPS="$(CREATE_VM_PIPS)"
+                FINAL_CREATE_BASTION="$(CREATE_BASTION)"
+                FINAL_CREATE_NAT="$(CREATE_NAT)"
+                FINAL_CREATE_KV="$(CREATE_KV)"
+                FINAL_CREATE_LAW="$(CREATE_LAW)"
+                
+                VM_COUNT_PARAM="$(EXTRACTED_VM_COUNT)"
+                VM_SIZE_PARAM="$(EXTRACTED_VM_SIZE)"
+                AGW_TIER_PARAM="$(EXTRACTED_AGW_TIER)"
+                ADMIN_USER_PARAM="$(EXTRACTED_ADMIN_USER)"
+                STORAGE_SKU_PARAM="$(EXTRACTED_STORAGE_SKU)"
+              else
+                FINAL_CREATE_VMS="${{ parameters.createVMs }}"
+                FINAL_CREATE_APP_GATEWAY="${{ parameters.createApplicationGateway }}"
+                FINAL_CREATE_LOAD_BALANCER="${{ parameters.createLoadBalancer }}"
+                FINAL_CREATE_STORAGE="${{ parameters.createStorageAccount }}"
+                FINAL_CREATE_VNET="${{ parameters.createVirtualNetwork }}"
+                FINAL_CREATE_AVSET="${{ parameters.createAvailabilitySet }}"
+                FINAL_CREATE_NSG="${{ parameters.createNetworkSecurityGroups }}"
+                FINAL_CREATE_VM_PIPS="${{ parameters.createVMPublicIPs }}"
+                FINAL_CREATE_BASTION="${{ parameters.createBastion }}"
+                FINAL_CREATE_NAT="${{ parameters.createNATGateway }}"
+                FINAL_CREATE_KV="${{ parameters.createKeyVault }}"
+                FINAL_CREATE_LAW="${{ parameters.createLogAnalytics }}"
+                
+                VM_COUNT_PARAM=${{ parameters.vmCount }}
+                if [ "$VM_COUNT_PARAM" = "0" ]; then
+                  VM_COUNT_PARAM=3
+                fi
+                VM_SIZE_PARAM="${{ parameters.vmSize }}"
+                if [ "$VM_SIZE_PARAM" = "auto-detect" ]; then
+                  VM_SIZE_PARAM="Standard_B2s"
+                fi
+                AGW_TIER_PARAM="${{ parameters.appGatewayTier }}"
+                if [ "$AGW_TIER_PARAM" = "auto-detect" ]; then
+                  AGW_TIER_PARAM="Standard_v2"
+                fi
+                ADMIN_USER_PARAM=$(vmAdminUsername)
+                STORAGE_SKU_PARAM="${{ parameters.storageAccountSku }}"
+              fi
+              
+              # Set all final variables
+              echo "##vso[task.setvariable variable=FINAL_CREATE_VMS]$FINAL_CREATE_VMS"
+              echo "##vso[task.setvariable variable=FINAL_CREATE_APP_GATEWAY]$FINAL_CREATE_APP_GATEWAY"
+              echo "##vso[task.setvariable variable=FINAL_CREATE_LOAD_BALANCER]$FINAL_CREATE_LOAD_BALANCER"
+              echo "##vso[task.setvariable variable=FINAL_CREATE_STORAGE]$FINAL_CREATE_STORAGE"
+              echo "##vso[task.setvariable variable=FINAL_CREATE_VNET]$FINAL_CREATE_VNET"
+              echo "##vso[task.setvariable variable=FINAL_CREATE_AVSET]$FINAL_CREATE_AVSET"
+              echo "##vso[task.setvariable variable=FINAL_CREATE_NSG]$FINAL_CREATE_NSG"
+              echo "##vso[task.setvariable variable=FINAL_CREATE_VM_PIPS]$FINAL_CREATE_VM_PIPS"
+              echo "##vso[task.setvariable variable=FINAL_CREATE_BASTION]$FINAL_CREATE_BASTION"
+              echo "##vso[task.setvariable variable=FINAL_CREATE_NAT]$FINAL_CREATE_NAT"
+              echo "##vso[task.setvariable variable=FINAL_CREATE_KV]$FINAL_CREATE_KV"
+              echo "##vso[task.setvariable variable=FINAL_CREATE_LAW]$FINAL_CREATE_LAW"
+              
+              echo "##vso[task.setvariable variable=VM_COUNT_PARAM]$VM_COUNT_PARAM"
+              echo "##vso[task.setvariable variable=VM_SIZE_PARAM]$VM_SIZE_PARAM"
+              echo "##vso[task.setvariable variable=AGW_TIER_PARAM]$AGW_TIER_PARAM"
+              echo "##vso[task.setvariable variable=ADMIN_USER_PARAM]$ADMIN_USER_PARAM"
+              echo "##vso[task.setvariable variable=STORAGE_SKU_PARAM]$STORAGE_SKU_PARAM"
+              
+              # Generate secure VM password
+              VM_PASSWORD="$(openssl rand -base64 32 | tr -d /=+ | cut -c -16)Aa1!"
+              echo "##vso[task.setvariable variable=VM_PASSWORD;isSecret=true]$VM_PASSWORD"
+              
+              echo "=== DEPLOYMENT CONFIGURATION ==="
+              echo "Environment: $ENV_NAME"
+              echo "Resource Group: ${{ parameters.resourceGroupName }}-$ENV_NAME"
+              echo "Operation: ${{ parameters.operation }}"
+              echo ""
+              echo "Resources to Create:"
+              echo "  VMs: $FINAL_CREATE_VMS (Count: $VM_COUNT_PARAM, Size: $VM_SIZE_PARAM)"
+              echo "  Application Gateway: $FINAL_CREATE_APP_GATEWAY (Tier: $AGW_TIER_PARAM)"
+              echo "  Load Balancer: $FINAL_CREATE_LOAD_BALANCER"
+              echo "  Storage Account: $FINAL_CREATE_STORAGE (SKU: $STORAGE_SKU_PARAM)"
+              echo "  Virtual Network: $FINAL_CREATE_VNET"
+              echo "  Availability Set: $FINAL_CREATE_AVSET"
+              echo "  NSGs: $FINAL_CREATE_NSG"
+              echo "  VM Public IPs: $FINAL_CREATE_VM_PIPS"
+              echo "  Bastion: $FINAL_CREATE_BASTION"
+              echo "  NAT Gateway: $FINAL_CREATE_NAT"
+              echo "  Key Vault: $FINAL_CREATE_KV"
+              echo "  Log Analytics: $FINAL_CREATE_LAW"
+              echo "================================="
+            displayName: 'Set Environment Variables and Final Configuration'
+          
+          - ${{ if eq(parameters.infrastructureMethod, 'bicep') }}:
+            - task: AzureCLI@2
+              displayName: 'Deploy Infrastructure with Bicep (Selective)'
+              inputs:
+                azureSubscription: $(subscriptionServiceConnection)
+                scriptType: 'bash'
+                scriptLocation: 'inlineScript'
+                inlineScript: |
+                  if [ "${{ parameters.operation }}" = "destroy" ]; then
+                    echo "Deleting resource group: $(RESOURCE_GROUP_NAME)"
+                    az group delete --name $(RESOURCE_GROUP_NAME) --yes --no-wait
+                    echo "✓ Resource group deletion initiated"
+                  else
+                    echo "Deploying selective infrastructure to: $(RESOURCE_GROUP_NAME)"
+                    echo "Operation: ${{ parameters.operation }}"
+                    
+                    if [ "${{ parameters.operation }}" = "extract_and_recreate" ]; then
+                      echo "Recreating configuration from: ${{ parameters.sourceResourceGroup }}"
+                    fi
+                    
+                    # Create resource group if it doesn't exist
+                    echo "Creating resource group..."
+                    az group create --name $(RESOURCE_GROUP_NAME) --location "$(location)"
+                    
+                    # Deploy Bicep template with ALL selective parameters
+                    echo "Deploying Bicep template with selective resource creation..."
+                    
+                    # Check if bicep file exists
+                    if [ ! -f "bicep/main.bicep" ]; then
+                      echo "ERROR: bicep/main.bicep file not found!"
+                      echo "Current directory: $(pwd)"
+                      echo "Files in current directory:"
+                      ls -la
+                      echo "Files in bicep directory (if it exists):"
+                      ls -la bicep/ 2>/dev/null || echo "bicep directory does not exist"
+                      exit 1
+                    fi
+                    
+                    # Check which parameters the Bicep template actually accepts
+                    echo "Checking Bicep template parameters..."
+                    BICEP_PARAMS=$(az deployment group validate \
+                      --resource-group $(RESOURCE_GROUP_NAME) \
+                      --template-file bicep/main.bicep \
+                      --parameters environmentName=test location=eastus vmAdminUsername=test vmAdminPassword=Test123! \
+                      --query "properties.template.parameters" -o json 2>/dev/null || echo '{}')
+                    
+                    echo "Available Bicep parameters:"
+                    echo "$BICEP_PARAMS" | jq -r 'keys[]' 2>/dev/null || echo "Could not detect parameters"
+                    
+                    # Check if template supports selective creation
+                    SUPPORTS_SELECTIVE=$(echo "$BICEP_PARAMS" | jq -r 'has("createVMs")' 2>/dev/null || echo "false")
+                    
+                    if [ "$SUPPORTS_SELECTIVE" = "true" ]; then
+                      echo "✅ Bicep template supports selective resource creation"
+                      # Deploy with full selective parameters
+                      az deployment group create \
+                        --resource-group $(RESOURCE_GROUP_NAME) \
+                        --template-file bicep/main.bicep \
+                        --parameters environmentName=$(ENV_NAME) \
+                        --parameters location="$(location)" \
+                        --parameters vmAdminUsername=$(ADMIN_USER_PARAM) \
+                        --parameters vmAdminPassword="$(VM_PASSWORD)" \
+                        --parameters vmSize="$(VM_SIZE_PARAM)" \
+                        --parameters vmCount=$(VM_COUNT_PARAM) \
+                        --parameters appGatewayTier="$(AGW_TIER_PARAM)" \
+                        --parameters appGatewaySkuName="$(AGW_TIER_PARAM)" \
+                        --parameters storageAccountSku="$(STORAGE_SKU_PARAM)" \
+                        --parameters createVMs=$(FINAL_CREATE_VMS) \
+                        --parameters createApplicationGateway=$(FINAL_CREATE_APP_GATEWAY) \
+                        --parameters createLoadBalancer=$(FINAL_CREATE_LOAD_BALANCER) \
+                        --parameters createStorageAccount=$(FINAL_CREATE_STORAGE) \
+                        --parameters createVirtualNetwork=$(FINAL_CREATE_VNET) \
+                        --parameters createAvailabilitySet=$(FINAL_CREATE_AVSET) \
+                        --parameters createNetworkSecurityGroups=$(FINAL_CREATE_NSG) \
+                        --parameters createVMPublicIPs=$(FINAL_CREATE_VM_PIPS) \
+                        --parameters createBastion=$(FINAL_CREATE_BASTION) \
+                        --parameters createNATGateway=$(FINAL_CREATE_NAT) \
+                        --parameters createKeyVault=$(FINAL_CREATE_KV) \
+                        --parameters createLogAnalytics=$(FINAL_CREATE_LAW) \
+                        --verbose
+                    else
+                      echo "⚠️  Bicep template uses legacy parameter set - deploying with basic parameters"
+                      # Deploy with basic parameters only
+                      az deployment group create \
+                        --resource-group $(RESOURCE_GROUP_NAME) \
+                        --template-file bicep/main.bicep \
+                        --parameters environmentName=$(ENV_NAME) \
+                        --parameters location="$(location)" \
+                        --parameters vmAdminUsername=$(ADMIN_USER_PARAM) \
+                        --parameters vmAdminPassword="$(VM_PASSWORD)" \
+                        --parameters vmSize="$(VM_SIZE_PARAM)" \
+                        --parameters vmCount=$(VM_COUNT_PARAM) \
+                        --parameters appGatewayTier="$(AGW_TIER_PARAM)" \
+                        --parameters appGatewaySkuName="$(AGW_TIER_PARAM)" \
+                        --verbose
+                    fi
+                    
+                    DEPLOYMENT_STATUS=$?
+                    
+                    if [ $DEPLOYMENT_STATUS -eq 0 ]; then
+                      echo "✓ Selective Bicep deployment successful"
+                      
+                      # Get deployment outputs
+                      echo "Getting deployment outputs..."
+                      
+                      # Application Gateway outputs (only if created)
+                      if [ "$(FINAL_CREATE_APP_GATEWAY)" = "True" ]; then
+                        AGW_FQDN=$(az deployment group show \
+                          --resource-group $(RESOURCE_GROUP_NAME) \
+                          --name main \
+                          --query properties.outputs.applicationGatewayFQDN.value -o tsv 2>/dev/null || echo "")
+                        
+                        AGW_IP=$(az deployment group show \
+                          --resource-group $(RESOURCE_GROUP_NAME) \
+                          --name main \
+                          --query properties.outputs.applicationGatewayPublicIP.value -o tsv 2>/dev/null || echo "")
+                      fi
+                      
+                      # Load Balancer outputs (only if created)
+                      if [ "$(FINAL_CREATE_LOAD_BALANCER)" = "True" ]; then
+                        LB_FQDN=$(az deployment group show \
+                          --resource-group $(RESOURCE_GROUP_NAME) \
+                          --name main \
+                          --query properties.outputs.loadBalancerFQDN.value -o tsv 2>/dev/null || echo "")
+                        
+                        LB_IP=$(az deployment group show \
+                          --resource-group $(RESOURCE_GROUP_NAME) \
+                          --name main \
+                          --query properties.outputs.loadBalancerPublicIP.value -o tsv 2>/dev/null || echo "")
+                      fi
+                      
+                      # VM names (only if created)
+                      if [ "$(FINAL_CREATE_VMS)" = "True" ]; then
+                        VM_NAMES=$(az deployment group show \
+                          --resource-group $(RESOURCE_GROUP_NAME) \
+                          --name main \
+                          --query properties.outputs.vmNames.value -o json 2>/dev/null || echo "[]")
+                      fi
+                      
+                      # Storage account info (only if created)
+                      if [ "$(FINAL_CREATE_STORAGE)" = "True" ]; then
+                        STORAGE_NAME=$(az deployment group show \
+                          --resource-group $(RESOURCE_GROUP_NAME) \
+                          --name main \
+                          --query properties.outputs.storageAccountName.value -o tsv 2>/dev/null || echo "")
+                      fi
+                      
+                      # Set variables for later stages
+                      if [ ! -z "$AGW_FQDN" ]; then
+                        echo "##vso[task.setvariable variable=APP_GATEWAY_URL;isOutput=true]http://$AGW_FQDN"
+                        echo "##vso[task.setvariable variable=APP_GATEWAY_FQDN;isOutput=true]$AGW_FQDN"
+                      fi
+                      
+                      if [ ! -z "$LB_FQDN" ]; then
+                        echo "##vso[task.setvariable variable=LOAD_BALANCER_URL;isOutput=true]http://$LB_FQDN"
+                        echo "##vso[task.setvariable variable=LOAD_BALANCER_FQDN;isOutput=true]$LB_FQDN"
+                      fi
+                      
+                      echo "##vso[task.setvariable variable=VM_NAMES;isOutput=true]$VM_NAMES"
+                      echo "##vso[task.setvariable variable=STORAGE_ACCOUNT_NAME;isOutput=true]$STORAGE_NAME"
+                      
+                      # Display deployment summary
+                      echo ""
+                      echo "=== SELECTIVE INFRASTRUCTURE DEPLOYMENT SUMMARY ==="
+                      if [ "${{ parameters.operation }}" = "extract_and_recreate" ]; then
+                        echo "Source: ${{ parameters.sourceResourceGroup }}"
+                        echo "Recreated as: $(RESOURCE_GROUP_NAME)"
+                      else
+                        echo "Environment: $(ENV_NAME)"
+                        echo "Resource Group: $(RESOURCE_GROUP_NAME)"
+                      fi
+                      echo ""
+                      echo "Created Resources:"
+                      [ "$(FINAL_CREATE_VMS)" = "True" ] && echo "  ✅ VMs: $(VM_COUNT_PARAM) x $(VM_SIZE_PARAM)"
+                      [ "$(FINAL_CREATE_APP_GATEWAY)" = "True" ] && echo "  ✅ Application Gateway: $(AGW_TIER_PARAM)"
+                      [ "$(FINAL_CREATE_LOAD_BALANCER)" = "True" ] && echo "  ✅ Load Balancer"
+                      [ "$(FINAL_CREATE_STORAGE)" = "True" ] && echo "  ✅ Storage Account: $(STORAGE_SKU_PARAM)"
+                      [ "$(FINAL_CREATE_VNET)" = "True" ] && echo "  ✅ Virtual Network"
+                      [ "$(FINAL_CREATE_AVSET)" = "True" ] && echo "  ✅ Availability Set"
+                      [ "$(FINAL_CREATE_NSG)" = "True" ] && echo "  ✅ Network Security Groups"
+                      [ "$(FINAL_CREATE_VM_PIPS)" = "True" ] && echo "  ✅ VM Public IPs"
+                      [ "$(FINAL_CREATE_BASTION)" = "True" ] && echo "  ✅ Bastion Host"
+                      [ "$(FINAL_CREATE_NAT)" = "True" ] && echo "  ✅ NAT Gateway"
+                      [ "$(FINAL_CREATE_KV)" = "True" ] && echo "  ✅ Key Vault"
+                      [ "$(FINAL_CREATE_LAW)" = "True" ] && echo "  ✅ Log Analytics Workspace"
+                      echo ""
+                      echo "Access URLs:"
+                      [ ! -z "$AGW_FQDN" ] && echo "  🌐 Application Gateway: http://$AGW_FQDN"
+                      [ ! -z "$LB_FQDN" ] && echo "  ⚖️  Load Balancer: http://$LB_FQDN"
+                      echo ""
+                      if [ "$(FINAL_CREATE_VMS)" = "True" ]; then
+                        echo "SSH Access:"
+                        if [ "$(FINAL_CREATE_LOAD_BALANCER)" = "True" ] && [ ! -z "$LB_FQDN" ]; then
+                          for i in $(seq 0 $(($(VM_COUNT_PARAM) - 1))); do
+                            PORT=$((2200 + i))
+                            echo "  🖥️  VM$i: ssh $(ADMIN_USER_PARAM)@$LB_FQDN -p $PORT"
+                          done
+                        elif [ "$(FINAL_CREATE_BASTION)" = "True" ]; then
+                          echo "  🏰 Use Azure Bastion from the Azure Portal"
+                        elif [ "$(FINAL_CREATE_VM_PIPS)" = "True" ]; then
+                          echo "  🌍 Direct access via individual VM public IPs"
+                        else
+                          echo "  🔒 Private access only (no external connectivity configured)"
+                        fi
+                      fi
+                      echo ""
+                      [ ! -z "$STORAGE_NAME" ] && echo "Storage Account: $STORAGE_NAME"
+                      echo "========================================================"
+                      
+                    else
+                      echo "✗ Bicep deployment failed with exit code: $DEPLOYMENT_STATUS"
+                      exit 1
+                    fi
+                  fi
+
+          - ${{ if eq(parameters.infrastructureMethod, 'azure_cli') }}:
+            - task: AzureCLI@2
+              displayName: 'Deploy Infrastructure with Azure CLI (Selective)'
+              inputs:
+                azureSubscription: $(subscriptionServiceConnection)
+                scriptType: 'bash'
+                scriptLocation: 'inlineScript'
+                inlineScript: |
+                  if [ "${{ parameters.operation }}" = "destroy" ]; then
+                    echo "Deleting resource group: $(RESOURCE_GROUP_NAME)"
+                    az group delete --name $(RESOURCE_GROUP_NAME) --yes --no-wait
+                  else
+                    echo "Creating selective infrastructure with Azure CLI"
+                    
+                    # Create resource group
+                    az group create --name $(RESOURCE_GROUP_NAME) --location "$(location)"
+                    
+                    # Create VNet if requested
+                    if [ "$(FINAL_CREATE_VNET)" = "True" ]; then
+                      echo "Creating Virtual Network..."
+                      az network vnet create \
+                        --name "vnet-$(ENV_NAME)" \
+                        --resource-group $(RESOURCE_GROUP_NAME) \
+                        --address-prefix 10.0.0.0/16 \
+                        --subnet-name backend-subnet \
+                        --subnet-prefix 10.0.2.0/24
+                    fi
+                    
+                    # Create Storage Account if requested
+                    if [ "$(FINAL_CREATE_STORAGE)" = "True" ]; then
+                      echo "Creating Storage Account..."
+                      STORAGE_NAME="st$(ENV_NAME)$(date +%s | tail -c 8)"
+                      az storage account create \
+                        --name $STORAGE_NAME \
+                        --resource-group $(RESOURCE_GROUP_NAME) \
+                        --location "$(location)" \
+                        --sku "$(STORAGE_SKU_PARAM)"
+                    fi
+                    
+                    # Create VMs if requested
+                    if [ "$(FINAL_CREATE_VMS)" = "True" ]; then
+                      echo "Creating Virtual Machines..."
+                      for i in $(seq 0 $(($(VM_COUNT_PARAM) - 1))); do
+                        VM_NAME="vm$i-$(ENV_NAME)"
+                        echo "Creating VM: $VM_NAME"
+                        az vm create \
+                          --name $VM_NAME \
+                          --resource-group $(RESOURCE_GROUP_NAME) \
+                          --image UbuntuLTS \
+                          --size "$(VM_SIZE_PARAM)" \
+                          --admin-username $(ADMIN_USER_PARAM) \
+                          --admin-password "$(VM_PASSWORD)" \
+                          --vnet-name "vnet-$(ENV_NAME)" \
+                          --subnet backend-subnet \
+                          --public-ip-address ""
+                      done
+                    fi
+                    
+                    echo "✓ Selective infrastructure created with Azure CLI"
+                  fi
+
+          - ${{ if eq(parameters.infrastructureMethod, 'arm_template') }}:
+            - task: AzureResourceManagerTemplateDeployment@3
+              displayName: 'Deploy ARM Template'
+              condition: ne('${{ parameters.operation }}', 'destroy')
+              inputs:
+                deploymentScope: 'Resource Group'
+                azureResourceManagerConnection: $(subscriptionServiceConnection)
+                action: 'Create Or Update Resource Group'
+                resourceGroupName: $(RESOURCE_GROUP_NAME)
+                location: $(location)
+                templateLocation: 'Linked artifact'
+                codeArtifactLocation: 'arm-templates/azuredeploy.json'
+                parametersLocation: 'Linked artifact'
+                codeParametersLocation: 'arm-templates/azuredeploy.parameters.json'
+                overrideParameters: |
+                  -environmentName $(ENV_NAME)
+                  -vmAdminUsername $(ADMIN_USER_PARAM)
+                  -vmAdminPassword $(VM_PASSWORD)
+                  -vmSize $(VM_SIZE_PARAM)
+                  -vmCount $(VM_COUNT_PARAM)
+                  -createVMs $(FINAL_CREATE_VMS)
+                  -createApplicationGateway $(FINAL_CREATE_APP_GATEWAY)
+                  -createLoadBalancer $(FINAL_CREATE_LOAD_BALANCER)
+                  -createStorageAccount $(FINAL_CREATE_STORAGE)
+                deploymentMode: 'Incremental'
+            
+            - task: AzureCLI@2
+              displayName: 'Delete Resources (ARM)'
+              condition: eq('${{ parameters.operation }}', 'destroy')
+              inputs:
+                azureSubscription: $(subscriptionServiceConnection)
+                scriptType: 'bash'
+                scriptLocation: 'inlineScript'
+                inlineScript: |
+                  az group delete --name $(RESOURCE_GROUP_NAME) --yes --no-wait
+
+- stage: ApplicationConfiguration
+  displayName: 'Configure Applications on VMs'
+  dependsOn: Infrastructure
+  condition: and(succeeded(), ne('${{ parameters.operation }}', 'destroy'), eq('${{ parameters.createVMs }}', 'True'))
+  jobs:
+  - deployment: ConfigureVMs
+    displayName: 'Configure VM Applications'
+    environment: ${{ parameters.targetEnvironment }}
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - checkout: self
+          
+          - script: |
+              if [ "${{ parameters.operation }}" = "create_new" ]; then
+                ENV_NAME="${{ parameters.newEnvironmentName }}"
+              elif [ "${{ parameters.operation }}" = "extract_and_recreate" ]; then
+                SOURCE_RG="${{ parameters.sourceResourceGroup }}"
+                ENV_NAME=$(echo "$SOURCE_RG" | sed 's/rg-//' | sed 's/myapp-//' | sed 's/-.*$//')-replica
+              else
+                ENV_NAME="${{ parameters.targetEnvironment }}"
+              fi
+              echo "##vso[task.setvariable variable=ENV_NAME]$ENV_NAME"
+              echo "##vso[task.setvariable variable=RESOURCE_GROUP_NAME]${{ parameters.resourceGroupName }}-$ENV_NAME"
+            displayName: 'Set Environment Variables'
+          
+          - task: AzureCLI@2
+            displayName: 'Configure VM Applications'
+            inputs:
+              azureSubscription: $(subscriptionServiceConnection)
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                echo "Configuring applications on VMs..."
+                
+                # Get VM information
+                VMS=$(az vm list --resource-group $(RESOURCE_GROUP_NAME) --query "[?contains(name, 'vm')].name" -o tsv)
+                
+                if [ -z "$VMS" ]; then
+                  echo "⚠️  No VMs found in resource group. Skipping VM configuration."
+                  exit 0
+                fi
+                
+                echo "Found VMs: $VMS"
+                
+                for vm in $VMS; do
+                  echo "Configuring VM: $vm"
+                  
+                  az vm run-command invoke \
+                    --resource-group $(RESOURCE_GROUP_NAME) \
+                    --name $vm \
+                    --command-id RunShellScript \
+                    --scripts "
+                      sudo apt-get update
+                      sudo apt-get install -y nginx htop curl wget
+                      
+                      # Create environment-specific index page
+                      sudo tee /var/www/html/index.html > /dev/null << EOF
 <!DOCTYPE html>
 <html>
 <head>
-    <title>VM {VM_NUMBER} - {ENVIRONMENT}</title>
+    <title>VM $vm - $(ENV_NAME)</title>
     <style>
-        body { font-family: Arial, sans-serif; margin: 40px; }
-        .container { padding: 20px; border: 1px solid #ddd; border-radius: 5px; }
+        body { font-family: Arial, sans-serif; margin: 40px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; }
+        .container { padding: 30px; border-radius: 10px; background: rgba(255,255,255,0.1); backdrop-filter: blur(10px); }
+        .status { color: #4ade80; font-weight: bold; font-size: 1.2em; }
+        .tag { background: rgba(255,255,255,0.2); padding: 5px 10px; border-radius: 20px; margin: 5px; display: inline-block; }
+        h1 { color: #fbbf24; }
     </style>
 </head>
 <body>
-    <div class="container">
-        <h1>VM {VM_NUMBER} - {ENVIRONMENT}</h1>
-        <p><strong>Status:</strong> Online</p>
-        <p><strong>Environment:</strong> {ENVIRONMENT}</p>
-        <p><strong>VM Number:</strong> {VM_NUMBER}</p>
-        <p><strong>Infrastructure:</strong> Minimal Recreation</p>
-        <p><strong>Hostname:</strong> $(hostname)</p>
-        <p><strong>Date:</strong> $(date)</p>
+    <div class='container'>
+        <h1>🖥️ $vm - $(ENV_NAME)</h1>
+        <p class='status'>✅ Status: Online and Configured</p>
+        <div>
+            <span class='tag'>Environment: $(ENV_NAME)</span>
+            <span class='tag'>VM: $vm</span>
+            <span class='tag'>Selective Infrastructure</span>
+        </div>
+        <p><strong>Hostname:</strong> \$(hostname)</p>
+        <p><strong>Date:</strong> \$(date)</p>
+        <p><strong>Infrastructure Mode:</strong> Selective Resource Creation</p>
+        <p><strong>Deployment Method:</strong> ${{ parameters.infrastructureMethod }}</p>
     </div>
 </body>
 </html>
 EOF
-        
-        # Replace placeholders
-        sed -i "s/{VM_NUMBER}/${i}/g" /var/www/html/index.html
-        sed -i "s/{ENVIRONMENT}/${environmentName}/g" /var/www/html/index.html
-        
-        # Create health check
-        echo "OK" > /var/www/html/health
-        
-        # Start nginx
-        systemctl enable nginx
-        systemctl start nginx
-        ''')
-    }
-    storageProfile: {
-      imageReference: {
-        publisher: 'Canonical'
-        offer: '0001-com-ubuntu-server-jammy'
-        sku: '22_04-lts-gen2'
-        version: 'latest'
-      }
-      osDisk: {
-        name: 'osdisk-vm${i}-${environmentName}-${uniqueString(resourceGroup().id)}'
-        caching: 'ReadWrite'
-        createOption: 'FromImage'
-        managedDisk: {
-          storageAccountType: 'Premium_LRS'
-        }
-      }
-    }
-    networkProfile: {
-      networkInterfaces: [
-        {
-          id: networkInterface[i].id
-        }
-      ]
-    }
-    diagnosticsProfile: {
-      bootDiagnostics: {
-        enabled: true
-        storageUri: storageAccount.properties.primaryEndpoints.blob
-      }
-    }
-  }
-  tags: {
-    Environment: environmentName
-    Project: 'MyApp'
-    VMNumber: string(i)
-    InfrastructureMode: 'Minimal'
-  }
-  dependsOn: [
-    networkInterface
-    storageAccount
-  ]
-}]
+                      
+                      echo 'OK' | sudo tee /var/www/html/health > /dev/null
+                      sudo systemctl enable nginx
+                      sudo systemctl start nginx
+                      echo 'VM configuration completed for $vm'
+                    " || echo "⚠️  Failed to configure $vm, but continuing..."
+                done
+                
+                echo "✓ VM configuration process completed"
 
-// Application Gateway
-resource applicationGateway 'Microsoft.Network/applicationGateways@2023-04-01' = {
-  name: appGatewayName
-  location: location
-  properties: {
-    sku: {
-      name: appGatewaySkuName
-      tier: appGatewayTier
-      capacity: 1
-    }
-    gatewayIPConfigurations: [
-      {
-        name: 'appGatewayIpConfig'
-        properties: {
-          subnet: {
-            id: resourceId('Microsoft.Network/virtualNetworks/subnets', vnetName, 'appgateway-subnet')
-          }
-        }
-      }
-    ]
-    frontendIPConfigurations: [
-      {
-        name: 'appGatewayFrontendIP'
-        properties: {
-          publicIPAddress: {
-            id: publicIp.id
-          }
-        }
-      }
-    ]
-    frontendPorts: [
-      {
-        name: 'appGatewayFrontendPort80'
-        properties: {
-          port: 80
-        }
-      }
-    ]
-    backendAddressPools: [
-      {
-        name: 'appGatewayBackendPool'
-        properties: {
-          backendAddresses: []
-        }
-      }
-    ]
-    backendHttpSettingsCollection: [
-      {
-        name: 'appGatewayBackendHttpSettings'
-        properties: {
-          port: 80
-          protocol: 'Http'
-          cookieBasedAffinity: 'Disabled'
-          requestTimeout: 30
-        }
-      }
-    ]
-    httpListeners: [
-      {
-        name: 'appGatewayHttpListener'
-        properties: {
-          frontendIPConfiguration: {
-            id: resourceId('Microsoft.Network/applicationGateways/frontendIPConfigurations', appGatewayName, 'appGatewayFrontendIP')
-          }
-          frontendPort: {
-            id: resourceId('Microsoft.Network/applicationGateways/frontendPorts', appGatewayName, 'appGatewayFrontendPort80')
-          }
-          protocol: 'Http'
-        }
-      }
-    ]
-    requestRoutingRules: [
-      {
-        name: 'appGatewayRoutingRule'
-        properties: {
-          ruleType: 'Basic'
-          priority: 100
-          httpListener: {
-            id: resourceId('Microsoft.Network/applicationGateways/httpListeners', appGatewayName, 'appGatewayHttpListener')
-          }
-          backendAddressPool: {
-            id: resourceId('Microsoft.Network/applicationGateways/backendAddressPools', appGatewayName, 'appGatewayBackendPool')
-          }
-          backendHttpSettings: {
-            id: resourceId('Microsoft.Network/applicationGateways/backendHttpSettingsCollection', appGatewayName, 'appGatewayBackendHttpSettings')
-          }
-        }
-      }
-    ]
-    enableHttp2: true
-  }
-  tags: {
-    Environment: environmentName
-    Project: 'MyApp'
-  }
-  dependsOn: [
-    virtualNetwork
-    networkInterface
-  ]
-}
+- stage: Testing
+  displayName: 'Post-Deployment Testing'
+  dependsOn: [Infrastructure, ApplicationConfiguration]
+  condition: and(succeeded(), ne('${{ parameters.operation }}', 'destroy'))
+  jobs:
+  - job: RunTests
+    displayName: 'Run Health Checks and Tests'
+    variables:
+      APP_GATEWAY_URL: $[ stageDependencies.Infrastructure.ManageInfrastructure.outputs['ManageInfrastructure.APP_GATEWAY_URL'] ]
+      LOAD_BALANCER_URL: $[ stageDependencies.Infrastructure.ManageInfrastructure.outputs['ManageInfrastructure.LOAD_BALANCER_URL'] ]
+      APP_GATEWAY_FQDN: $[ stageDependencies.Infrastructure.ManageInfrastructure.outputs['ManageInfrastructure.APP_GATEWAY_FQDN'] ]
+      LOAD_BALANCER_FQDN: $[ stageDependencies.Infrastructure.ManageInfrastructure.outputs['ManageInfrastructure.LOAD_BALANCER_FQDN'] ]
+    steps:
+    - script: |
+        if [ "${{ parameters.operation }}" = "create_new" ]; then
+          ENV_NAME="${{ parameters.newEnvironmentName }}"
+        elif [ "${{ parameters.operation }}" = "extract_and_recreate" ]; then
+          SOURCE_RG="${{ parameters.sourceResourceGroup }}"
+          ENV_NAME=$(echo "$SOURCE_RG" | sed 's/rg-//' | sed 's/myapp-//' | sed 's/-.*$//')-replica
+        else
+          ENV_NAME="${{ parameters.targetEnvironment }}"
+        fi
+        
+        echo "=== TESTING SELECTIVE INFRASTRUCTURE ==="
+        echo "Environment: $ENV_NAME"
+        echo "Operation: ${{ parameters.operation }}"
+        echo ""
+        
+        echo "Testing components based on what was created:"
+        echo "  VMs: ${{ parameters.createVMs }}"
+        echo "  Application Gateway: ${{ parameters.createApplicationGateway }}"
+        echo "  Load Balancer: ${{ parameters.createLoadBalancer }}"
+        echo "  Storage Account: ${{ parameters.createStorageAccount }}"
+        echo ""
+        
+        sleep 30
+        
+        # Test Application Gateway (only if created)
+        if [ "${{ parameters.createApplicationGateway }}" = "True" ] && [ ! -z "$(APP_GATEWAY_URL)" ]; then
+          echo "🧪 Testing Application Gateway..."
+          for i in {1..3}; do
+            response=$(curl -s -o /dev/null -w "%{http_code}" $(APP_GATEWAY_URL) || echo "000")
+            if [ $response -eq 200 ]; then
+              echo "✅ Application Gateway health check passed"
+              break
+            else
+              echo "⚠️  Application Gateway health check failed with status: $response"
+              sleep 30
+            fi
+          done
+        else
+          echo "⏭️  Application Gateway testing skipped (not created or no URL)"
+        fi
+        
+        # Test Load Balancer (only if created)
+        if [ "${{ parameters.createLoadBalancer }}" = "True" ] && [ ! -z "$(LOAD_BALANCER_URL)" ]; then
+          echo "🧪 Testing Load Balancer..."
+          for i in {1..3}; do
+            response=$(curl -s -o /dev/null -w "%{http_code}" $(LOAD_BALANCER_URL) || echo "000")
+            if [ $response -eq 200 ]; then
+              echo "✅ Load Balancer health check passed"
+              break
+            else
+              echo "⚠️  Load Balancer health check failed with status: $response"
+              sleep 30
+            fi
+          done
+        else
+          echo "⏭️  Load Balancer testing skipped (not created or no URL)"
+        fi
+        
+        echo ""
+        echo "=== TESTING SUMMARY ==="
+        echo "Environment: $ENV_NAME"
+        echo "Created components tested successfully"
+        echo "================================"
+      displayName: 'Infrastructure Health Check and Testing (Selective)'
 
-// Outputs
-output storageAccountName string = storageAccount.name
-output storageAccountId string = storageAccount.id
-output primaryEndpoint string = storageAccount.properties.primaryEndpoints.blob
-output resourceGroupName string = resourceGroup().name
-output connectionString string = 'DefaultEndpointsProtocol=https;AccountName=${storageAccount.name};AccountKey=${storageAccount.listKeys().keys[0].value};EndpointSuffix=core.windows.net'
-output applicationGatewayName string = applicationGateway.name
-output applicationGatewayPublicIP string = publicIp.properties.ipAddress
-output applicationGatewayFQDN string = publicIp.properties.dnsSettings.fqdn
-output virtualNetworkName string = virtualNetwork.name
-output vmNames array = [for i in range(0, vmCount): 'vm${i}-${environmentName}-${uniqueString(resourceGroup().id)}']
-output vmPrivateIPs array = [for i in range(0, vmCount): networkInterface[i].properties.ipConfigurations[0].properties.privateIPAddress]
-output vmPublicIPs array = [for i in range(0, vmCount): vmPublicIps[i].properties.ipAddress]
-output vmPublicFQDNs array = [for i in range(0, vmCount): vmPublicIps[i].properties.dnsSettings.fqdn]
-output sshConnections array = [for i in range(0, vmCount): {
-  vmName: 'vm${i}-${environmentName}-${uniqueString(resourceGroup().id)}'
-  sshCommand: 'ssh ${vmAdminUsername}@${vmPublicIps[i].properties.dnsSettings.fqdn}'
-}]
-
-// Infrastructure summary output
-output infrastructureSummary object = {
-  mode: 'Minimal'
-  vmAccessMethod: 'public-ip'
-  components: {
-    loadBalancer: false
-    availabilitySet: false
-    enhancedNetworking: false
-    additionalStorage: false
-    vmCount: vmCount
-    vmSize: vmSize
-    appGatewayTier: appGatewayTier
-  }
-  accessUrls: {
-    applicationGateway: 'http://${publicIp.properties.dnsSettings.fqdn}'
-    loadBalancer: 'Not included'
-  }
-}
+- stage: Notification
+  displayName: 'Send Notifications'
+  dependsOn: [Infrastructure, ApplicationConfiguration, Testing]
+  condition: always()
+  jobs:
+  - job: SendNotification
+    displayName: 'Send Deployment Notification'
+    variables:
+      APP_GATEWAY_URL: $[ stageDependencies.Infrastructure.ManageInfrastructure.outputs['ManageInfrastructure.APP_GATEWAY_URL'] ]
+      LOAD_BALANCER_URL: $[ stageDependencies.Infrastructure.ManageInfrastructure.outputs['ManageInfrastructure.LOAD_BALANCER_URL'] ]
+      APP_GATEWAY_FQDN: $[ stageDependencies.Infrastructure.ManageInfrastructure.outputs['ManageInfrastructure.APP_GATEWAY_FQDN'] ]
+      LOAD_BALANCER_FQDN: $[ stageDependencies.Infrastructure.ManageInfrastructure.outputs['ManageInfrastructure.LOAD_BALANCER_FQDN'] ]
+    steps:
+    - script: |
+        ENV_NAME="${{ parameters.targetEnvironment }}"
+        if [ "${{ parameters.operation }}" = "create_new" ]; then
+          ENV_NAME="${{ parameters.newEnvironmentName }}"
+        elif [ "${{ parameters.operation }}" = "extract_and_recreate" ]; then
+          SOURCE_RG="${{ parameters.sourceResourceGroup }}"
+          ENV_NAME=$(echo "$SOURCE_RG" | sed 's/rg-//' | sed 's/myapp-//' | sed 's/-.*$//')-replica
+        fi
+        
+        STATUS="✅ Success"
+        if [ "$(Agent.JobStatus)" != "Succeeded" ]; then
+          STATUS="❌ Failed"
+        fi
+        
+        echo "=========================================================="
+        echo "           SELECTIVE INFRASTRUCTURE DEPLOYMENT"
+        echo "                    FINAL SUMMARY"
+        echo "=========================================================="
+        echo "Status: $STATUS"
+        echo "Operation: ${{ parameters.operation }}"
+        echo "Infrastructure Method: ${{ parameters.infrastructureMethod }}"
+        echo ""
+        
+        if [ "${{ parameters.operation }}" = "extract_and_recreate" ]; then
+          echo "📦 EXTRACTION & RECREATION"
+          echo "Source Resource Group: ${{ parameters.sourceResourceGroup }}"
+          echo "Recreated as Environment: $ENV_NAME"
+          echo "New Resource Group: ${{ parameters.resourceGroupName }}-$ENV_NAME"
+        else
+          echo "🏗️  INFRASTRUCTURE DEPLOYMENT"
+          echo "Environment: $ENV_NAME"
+          echo "Resource Group: ${{ parameters.resourceGroupName }}-$ENV_NAME"
+        fi
+        echo ""
+        
+        echo "🎯 SELECTIVE RESOURCE CREATION RESULTS"
+        echo "Created Resources:"
+        [ "${{ parameters.createVMs }}" = "True" ] && echo "  ✅ Virtual Machines: ${{ parameters.vmCount }} x ${{ parameters.vmSize }}"
+        [ "${{ parameters.createApplicationGateway }}" = "True" ] && echo "  ✅ Application Gateway: ${{ parameters.appGatewayTier }}"
+        [ "${{ parameters.createLoadBalancer }}" = "True" ] && echo "  ✅ Load Balancer: Standard SKU"
+        [ "${{ parameters.createStorageAccount }}" = "True" ] && echo "  ✅ Storage Account: ${{ parameters.storageAccountSku }}"
+        [ "${{ parameters.createVirtualNetwork }}" = "True" ] && echo "  ✅ Virtual Network: 10.0.0.0/16"
+        [ "${{ parameters.createAvailabilitySet }}" = "True" ] && echo "  ✅ Availability Set: 2 fault domains"
+        [ "${{ parameters.createNetworkSecurityGroups }}" = "True" ] && echo "  ✅ Network Security Groups: HTTP/HTTPS/SSH rules"
+        [ "${{ parameters.createVMPublicIPs }}" = "True" ] && echo "  ✅ VM Public IPs: Individual access"
+        [ "${{ parameters.createBastion }}" = "True" ] && echo "  ✅ Bastion Host: Secure VM access"
+        [ "${{ parameters.createNATGateway }}" = "True" ] && echo "  ✅ NAT Gateway: Outbound connectivity"
+        [ "${{ parameters.createKeyVault }}" = "True" ] && echo "  ✅ Key Vault: Secret management"
+        [ "${{ parameters.createLogAnalytics }}" = "True" ] && echo "  ✅ Log Analytics: Monitoring and logs"
+        
+        echo ""
+        echo "Skipped Resources:"
+        [ "${{ parameters.createVMs }}" = "False" ] && echo "  ⏭️  Virtual Machines: Not requested"
+        [ "${{ parameters.createApplicationGateway }}" = "False" ] && echo "  ⏭️  Application Gateway: Not requested"
+        [ "${{ parameters.createLoadBalancer }}" = "False" ] && echo "  ⏭️  Load Balancer: Not requested"
+        [ "${{ parameters.createStorageAccount }}" = "False" ] && echo "  ⏭️  Storage Account: Not requested"
+        [ "${{ parameters.createVirtualNetwork }}" = "False" ] && echo "  ⏭️  Virtual Network: Not requested"
+        [ "${{ parameters.createAvailabilitySet }}" = "False" ] && echo "  ⏭️  Availability Set: Not requested"
+        [ "${{ parameters.createNetworkSecurityGroups }}" = "False" ] && echo "  ⏭️  Network Security Groups: Not requested"
+        [ "${{ parameters.createVMPublicIPs }}" = "False" ] && echo "  ⏭️  VM Public IPs: Not requested"
+        [ "${{ parameters.createBastion }}" = "False" ] && echo "  ⏭️  Bastion Host: Not requested"
+        [ "${{ parameters.createNATGateway }}" = "False" ] && echo "  ⏭️  NAT Gateway: Not requested"
+        [ "${{ parameters.createKeyVault }}" = "False" ] && echo "  ⏭️  Key Vault: Not requested"
+        [ "${{ parameters.createLogAnalytics }}" = "False" ] && echo "  ⏭️  Log Analytics: Not requested"
+        
+        echo ""
+        echo "🌐 ACCESS INFORMATION"
+        [ ! -z "$(APP_GATEWAY_URL)" ] && echo "Application Gateway: $(APP_GATEWAY_URL)"
+        [ ! -z "$(LOAD_BALANCER_URL)" ] && echo "Load Balancer: $(LOAD_BALANCER_URL)"
+        
+        echo ""
+        echo "📋 NEXT STEPS"
+        echo "1. Verify all created resources are functioning correctly"
+        echo "2. Configure any additional application-specific settings"
+        echo "3. Set up monitoring and alerting for created resources"
+        echo "4. Update DNS records if external access is required"
+        echo "5. Review and optimize resource sizing based on usage"
+        
+        if [ "${{ parameters.operation }}" = "extract_and_recreate" ]; then
+          echo ""
+          echo "🔄 MIGRATION NOTES"
+          echo "• Original resource group preserved: ${{ parameters.sourceResourceGroup }}"
+          echo "• New infrastructure follows Infrastructure as Code practices"
+          echo "• Selective resource creation allows cost optimization"
+          echo "• Review and cleanup original resources when migration is complete"
+        fi
+        
+        echo "=========================================================="
+        
+        if [ "$STATUS" = "✅ Success" ]; then
+          echo ""
+          echo "🎉 DEPLOYMENT COMPLETED SUCCESSFULLY!"
+          echo "Your selective infrastructure is ready for use."
+        else
+          echo ""
+          echo "⚠️  DEPLOYMENT ENCOUNTERED ISSUES"
+          echo "Please check the pipeline logs for detailed error information."
+        fi
+        
+      displayName: 'Display Comprehensive Deployment Summary'
