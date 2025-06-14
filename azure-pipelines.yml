@@ -143,7 +143,7 @@ stages:
                     --name "$DEPLOYMENT_NAME" \
                     --parameters environmentName=$(ENV_NAME) \
                     --parameters location="$(location)" \
-                    --verbose
+                    --verbose --debug
                   
                   DEPLOYMENT_STATUS=$?
                   
