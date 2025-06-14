@@ -296,40 +296,66 @@ stages:
   - job: RunTests
     displayName: 'Run Health Checks and Tests'
     steps:
-    - script: |
-        # Set environment name
-        if [ "${{ parameters.operation }}" = "create_new" ]; then
-          ENV_NAME="${{ parameters.newEnvironmentName }}"
-        else
-          ENV_NAME="${{ parameters.targetEnvironment }}"
-        fi
-        
-        echo "Running tests for environment: $ENV_NAME"
-        echo "Resource Group: ${{ parameters.resourceGroupName }}-$ENV_NAME"
-        
-        # Basic infrastructure validation
-        echo "Validating deployed infrastructure..."
-        
-        # Check if resource group exists
-        if az group show --name "${{ parameters.resourceGroupName }}-$ENV_NAME" --output none 2>/dev/null; then
-          echo "✓ Resource group exists"
-        else
-          echo "✗ Resource group not found"
-          exit 1
-        fi
-        
-        # List resources in the group
-        echo "Resources in group:"
-        az resource list --resource-group "${{ parameters.resourceGroupName }}-$ENV_NAME" --output table
-        
-        # Environment-specific tests
-        if [ "$ENV_NAME" = "staging" ] || [ "$ENV_NAME" = "prod" ]; then
-          echo "Running comprehensive tests for $ENV_NAME environment"
-          # Add your environment-specific test commands here
-        fi
-        
-        echo "✓ All tests completed successfully"
+    # Login to Azure first for testing
+    - task: AzureCLI@2
       displayName: 'Health Check and Testing'
+      inputs:
+        azureSubscription: $(subscriptionServiceConnection)
+        scriptType: 'bash'
+        scriptLocation: 'inlineScript'
+        inlineScript: |
+          # Set environment name
+          if [ "${{ parameters.operation }}" = "create_new" ]; then
+            ENV_NAME="${{ parameters.newEnvironmentName }}"
+          else
+            ENV_NAME="${{ parameters.targetEnvironment }}"
+          fi
+          
+          RESOURCE_GROUP_NAME="${{ parameters.resourceGroupName }}-$ENV_NAME"
+          
+          echo "Running tests for environment: $ENV_NAME"
+          echo "Resource Group: $RESOURCE_GROUP_NAME"
+          
+          # Basic infrastructure validation
+          echo "Validating deployed infrastructure..."
+          
+          # Check if resource group exists
+          if az group show --name "$RESOURCE_GROUP_NAME" --output none 2>/dev/null; then
+            echo "✓ Resource group exists: $RESOURCE_GROUP_NAME"
+          else
+            echo "✗ Resource group not found: $RESOURCE_GROUP_NAME"
+            echo "Available resource groups:"
+            az group list --query "[].name" --output table
+            exit 1
+          fi
+          
+          # List resources in the group
+          echo "Resources in group $RESOURCE_GROUP_NAME:"
+          az resource list --resource-group "$RESOURCE_GROUP_NAME" --output table
+          
+          # Validate storage account (from Bicep template)
+          echo "Validating storage account..."
+          STORAGE_ACCOUNTS=$(az storage account list --resource-group "$RESOURCE_GROUP_NAME" --query "[].name" --output tsv)
+          if [ ! -z "$STORAGE_ACCOUNTS" ]; then
+            echo "✓ Storage account(s) found: $STORAGE_ACCOUNTS"
+          else
+            echo "⚠ No storage accounts found in resource group"
+          fi
+          
+          # Environment-specific tests
+          if [ "$ENV_NAME" = "staging" ] || [ "$ENV_NAME" = "prod" ]; then
+            echo "Running comprehensive tests for $ENV_NAME environment"
+            # Add your environment-specific test commands here
+            
+            # Example: Test storage account access
+            for STORAGE_NAME in $STORAGE_ACCOUNTS; do
+              echo "Testing storage account: $STORAGE_NAME"
+              # Get storage account info
+              az storage account show --name "$STORAGE_NAME" --resource-group "$RESOURCE_GROUP_NAME" --query "statusOfPrimary" --output tsv
+            done
+          fi
+          
+          echo "✓ All tests completed successfully"
 
 - stage: Notification
   displayName: 'Send Notifications'
