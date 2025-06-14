@@ -6,7 +6,7 @@
       "value": "eastus"
     },
     "environment": {
-      "value": "dev"
+      "value": "staging"
     },
     "projectName": {
       "value": "MyApp"
