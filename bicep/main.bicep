@@ -1,6 +1,3 @@
-// This template creates ONLY what was in your original resource group
-// No extra load balancer, availability sets, etc.
-
 @description('Environment name')
 param environmentName string
 
@@ -28,12 +25,6 @@ param vmSize string = 'Standard_B2s'
 @description('Number of VMs to create')
 param vmCount int = 3
 
-@description('Include Load Balancer (false = minimal recreation)')
-param includeLoadBalancer bool = false
-
-@description('Include Availability Set (false = minimal recreation)')
-param includeAvailabilitySet bool = false
-
 // Variables for consistent naming
 var cleanEnvName = toLower(replace(environmentName, '-', ''))
 var storageAccountName = take('st${cleanEnvName}${uniqueString(resourceGroup().id)}', 24)
@@ -41,12 +32,6 @@ var vnetName = 'vnet-${environmentName}-${uniqueString(resourceGroup().id)}'
 var publicIpName = 'pip-agw-${environmentName}-${uniqueString(resourceGroup().id)}'
 var appGatewayName = 'agw-${environmentName}-${uniqueString(resourceGroup().id)}'
 var nsgName = 'nsg-agw-${environmentName}-${uniqueString(resourceGroup().id)}'
-var vmNsgName = 'nsg-vm-${environmentName}-${uniqueString(resourceGroup().id)}'
-
-// Optional Load Balancer variables (only used if includeLoadBalancer = true)
-var loadBalancerName = 'lb-${environmentName}-${uniqueString(resourceGroup().id)}'
-var lbPublicIpName = 'pip-lb-${environmentName}-${uniqueString(resourceGroup().id)}'
-var availabilitySetName = 'avset-${environmentName}-${uniqueString(resourceGroup().id)}'
 
 // Network Security Group for Application Gateway
 resource networkSecurityGroup 'Microsoft.Network/networkSecurityGroups@2023-04-01' = {
@@ -101,46 +86,6 @@ resource networkSecurityGroup 'Microsoft.Network/networkSecurityGroups@2023-04-0
   }
 }
 
-// Basic NSG for VMs (minimal rules)
-resource vmNetworkSecurityGroup 'Microsoft.Network/networkSecurityGroups@2023-04-01' = {
-  name: vmNsgName
-  location: location
-  properties: {
-    securityRules: [
-      {
-        name: 'AllowHTTP'
-        properties: {
-          protocol: 'Tcp'
-          sourcePortRange: '*'
-          destinationPortRange: '80'
-          sourceAddressPrefix: '*'
-          destinationAddressPrefix: '*'
-          access: 'Allow'
-          priority: 100
-          direction: 'Inbound'
-        }
-      }
-      {
-        name: 'AllowSSH'
-        properties: {
-          protocol: 'Tcp'
-          sourcePortRange: '*'
-          destinationPortRange: '22'
-          sourceAddressPrefix: '*'
-          destinationAddressPrefix: '*'
-          access: 'Allow'
-          priority: 300
-          direction: 'Inbound'
-        }
-      }
-    ]
-  }
-  tags: {
-    Environment: environmentName
-    Project: 'MyApp'
-  }
-}
-
 // Virtual Network
 resource virtualNetwork 'Microsoft.Network/virtualNetworks@2023-04-01' = {
   name: vnetName
@@ -165,9 +110,6 @@ resource virtualNetwork 'Microsoft.Network/virtualNetworks@2023-04-01' = {
         name: 'backend-subnet'
         properties: {
           addressPrefix: '10.0.2.0/24'
-          networkSecurityGroup: {
-            id: vmNetworkSecurityGroup.id
-          }
         }
       }
     ]
@@ -224,7 +166,7 @@ resource blobService 'Microsoft.Storage/storageAccounts/blobServices@2023-01-01'
   name: 'default'
 }
 
-// Storage Containers
+// Storage Container
 resource uploadsContainer 'Microsoft.Storage/storageAccounts/blobServices/containers@2023-01-01' = {
   parent: blobService
   name: 'uploads'
@@ -233,25 +175,8 @@ resource uploadsContainer 'Microsoft.Storage/storageAccounts/blobServices/contai
   }
 }
 
-// Optional: Availability Set (only if includeAvailabilitySet = true)
-resource availabilitySet 'Microsoft.Compute/availabilitySets@2023-03-01' = if (includeAvailabilitySet) {
-  name: availabilitySetName
-  location: location
-  sku: {
-    name: 'Aligned'
-  }
-  properties: {
-    platformFaultDomainCount: 2
-    platformUpdateDomainCount: 3
-  }
-  tags: {
-    Environment: environmentName
-    Project: 'MyApp'
-  }
-}
-
-// Public IPs for VMs (if no load balancer)
-resource vmPublicIps 'Microsoft.Network/publicIPAddresses@2023-04-01' = [for i in range(0, vmCount): if (!includeLoadBalancer) {
+// Public IPs for VMs
+resource vmPublicIps 'Microsoft.Network/publicIPAddresses@2023-04-01' = [for i in range(0, vmCount): {
   name: 'pip-vm${i}-${environmentName}-${uniqueString(resourceGroup().id)}'
   location: location
   sku: {
@@ -259,14 +184,18 @@ resource vmPublicIps 'Microsoft.Network/publicIPAddresses@2023-04-01' = [for i i
   }
   properties: {
     publicIPAllocationMethod: 'Dynamic'
+    dnsSettings: {
+      domainNameLabel: 'vm${i}-${cleanEnvName}-${uniqueString(resourceGroup().id)}'
+    }
   }
   tags: {
     Environment: environmentName
     Project: 'MyApp'
+    VMNumber: string(i)
   }
 }]
 
-// Network Interfaces for VMs (simplified - no load balancer dependencies)
+// Network Interfaces for VMs
 resource networkInterface 'Microsoft.Network/networkInterfaces@2023-04-01' = [for i in range(0, vmCount): {
   name: 'nic-vm${i}-${environmentName}-${uniqueString(resourceGroup().id)}'
   location: location
@@ -279,9 +208,9 @@ resource networkInterface 'Microsoft.Network/networkInterfaces@2023-04-01' = [fo
           subnet: {
             id: resourceId('Microsoft.Network/virtualNetworks/subnets', vnetName, 'backend-subnet')
           }
-          publicIPAddress: !includeLoadBalancer ? {
+          publicIPAddress: {
             id: vmPublicIps[i].id
-          } : null
+          }
         }
       }
     ]
@@ -289,20 +218,18 @@ resource networkInterface 'Microsoft.Network/networkInterfaces@2023-04-01' = [fo
   tags: {
     Environment: environmentName
     Project: 'MyApp'
+    VMNumber: string(i)
   }
   dependsOn: [
     virtualNetwork
   ]
 }]
 
-// Virtual Machines (minimal configuration)
+// Virtual Machines
 resource virtualMachine 'Microsoft.Compute/virtualMachines@2023-03-01' = [for i in range(0, vmCount): {
   name: 'vm${i}-${environmentName}-${uniqueString(resourceGroup().id)}'
   location: location
   properties: {
-    availabilitySet: includeAvailabilitySet ? {
-      id: availabilitySet.id
-    } : null
     hardwareProfile: {
       vmSize: vmSize
     }
@@ -310,6 +237,47 @@ resource virtualMachine 'Microsoft.Compute/virtualMachines@2023-03-01' = [for i 
       computerName: 'vm${i}-${environmentName}'
       adminUsername: vmAdminUsername
       adminPassword: vmAdminPassword
+      customData: base64('''#!/bin/bash
+        # Basic VM setup - minimal recreation
+        apt-get update
+        apt-get install -y nginx
+        
+        # Create simple web page
+        cat > /var/www/html/index.html << 'EOF'
+<!DOCTYPE html>
+<html>
+<head>
+    <title>VM {VM_NUMBER} - {ENVIRONMENT}</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 40px; }
+        .container { padding: 20px; border: 1px solid #ddd; border-radius: 5px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>VM {VM_NUMBER} - {ENVIRONMENT}</h1>
+        <p><strong>Status:</strong> Online</p>
+        <p><strong>Environment:</strong> {ENVIRONMENT}</p>
+        <p><strong>VM Number:</strong> {VM_NUMBER}</p>
+        <p><strong>Infrastructure:</strong> Minimal Recreation</p>
+        <p><strong>Hostname:</strong> $(hostname)</p>
+        <p><strong>Date:</strong> $(date)</p>
+    </div>
+</body>
+</html>
+EOF
+        
+        # Replace placeholders
+        sed -i "s/{VM_NUMBER}/${i}/g" /var/www/html/index.html
+        sed -i "s/{ENVIRONMENT}/${environmentName}/g" /var/www/html/index.html
+        
+        # Create health check
+        echo "OK" > /var/www/html/health
+        
+        # Start nginx
+        systemctl enable nginx
+        systemctl start nginx
+        ''')
     }
     storageProfile: {
       imageReference: {
@@ -345,6 +313,7 @@ resource virtualMachine 'Microsoft.Compute/virtualMachines@2023-03-01' = [for i 
     Environment: environmentName
     Project: 'MyApp'
     VMNumber: string(i)
+    InfrastructureMode: 'Minimal'
   }
   dependsOn: [
     networkInterface
@@ -352,7 +321,7 @@ resource virtualMachine 'Microsoft.Compute/virtualMachines@2023-03-01' = [for i 
   ]
 }]
 
-// Application Gateway (points directly to VM private IPs)
+// Application Gateway
 resource applicationGateway 'Microsoft.Network/applicationGateways@2023-04-01' = {
   name: appGatewayName
   location: location
@@ -394,9 +363,7 @@ resource applicationGateway 'Microsoft.Network/applicationGateways@2023-04-01' =
       {
         name: 'appGatewayBackendPool'
         properties: {
-          backendAddresses: [for i in range(0, vmCount): {
-            ipAddress: networkInterface[i].properties.ipConfigurations[0].properties.privateIPAddress
-          }]
+          backendAddresses: []
         }
       }
     ]
@@ -457,15 +424,38 @@ resource applicationGateway 'Microsoft.Network/applicationGateways@2023-04-01' =
 
 // Outputs
 output storageAccountName string = storageAccount.name
+output storageAccountId string = storageAccount.id
+output primaryEndpoint string = storageAccount.properties.primaryEndpoints.blob
+output resourceGroupName string = resourceGroup().name
+output connectionString string = 'DefaultEndpointsProtocol=https;AccountName=${storageAccount.name};AccountKey=${storageAccount.listKeys().keys[0].value};EndpointSuffix=core.windows.net'
 output applicationGatewayName string = applicationGateway.name
 output applicationGatewayPublicIP string = publicIp.properties.ipAddress
 output applicationGatewayFQDN string = publicIp.properties.dnsSettings.fqdn
 output virtualNetworkName string = virtualNetwork.name
 output vmNames array = [for i in range(0, vmCount): 'vm${i}-${environmentName}-${uniqueString(resourceGroup().id)}']
-output vmPublicIPs array = !includeLoadBalancer ? [for i in range(0, vmCount): vmPublicIps[i].properties.ipAddress] : []
-output resourceSummary object = {
-  includeLoadBalancer: includeLoadBalancer
-  includeAvailabilitySet: includeAvailabilitySet
-  vmCount: vmCount
-  hasPublicIPs: !includeLoadBalancer
+output vmPrivateIPs array = [for i in range(0, vmCount): networkInterface[i].properties.ipConfigurations[0].properties.privateIPAddress]
+output vmPublicIPs array = [for i in range(0, vmCount): vmPublicIps[i].properties.ipAddress]
+output vmPublicFQDNs array = [for i in range(0, vmCount): vmPublicIps[i].properties.dnsSettings.fqdn]
+output sshConnections array = [for i in range(0, vmCount): {
+  vmName: 'vm${i}-${environmentName}-${uniqueString(resourceGroup().id)}'
+  sshCommand: 'ssh ${vmAdminUsername}@${vmPublicIps[i].properties.dnsSettings.fqdn}'
+}]
+
+// Infrastructure summary output
+output infrastructureSummary object = {
+  mode: 'Minimal'
+  vmAccessMethod: 'public-ip'
+  components: {
+    loadBalancer: false
+    availabilitySet: false
+    enhancedNetworking: false
+    additionalStorage: false
+    vmCount: vmCount
+    vmSize: vmSize
+    appGatewayTier: appGatewayTier
+  }
+  accessUrls: {
+    applicationGateway: 'http://${publicIp.properties.dnsSettings.fqdn}'
+    loadBalancer: 'Not included'
+  }
 }
