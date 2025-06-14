@@ -526,7 +526,7 @@ resource storageAccounts_sttestv2uctbalaua43sc_name_default_uploads 'Microsoft.S
     publicAccess: 'None'
   }
   dependsOn: [
-    storageAccounts_sttestv2uctbalaua43sc_name_resource
+    storageAccounts_sttestv2uctbalaua43sc_name_resource 
   ]
 }
 
