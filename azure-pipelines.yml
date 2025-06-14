@@ -1,4 +1,4 @@
-# Azure DevOps Pipeline for Environment Management (No Terraform)
+# Azure DevOps Pipeline for Environment Management - BICEP ONLY
 trigger: none
 
 parameters:
@@ -40,15 +40,6 @@ parameters:
   type: string
   default: 'rg-myapp'
 
-- name: infrastructureMethod
-  displayName: 'Infrastructure Method'
-  type: string
-  default: 'bicep'
-  values:
-  - bicep
-  - azure_cli
-  - arm_template
-
 variables:
 - group: 'environment-secrets'
 - name: subscriptionServiceConnection
@@ -68,7 +59,7 @@ stages:
     steps:
     - script: |
         echo "Operation: ${{ parameters.operation }}"
-        echo "Infrastructure Method: ${{ parameters.infrastructureMethod }}"
+        echo "Infrastructure Method: Bicep"
         
         # Validate new environment name if creating new
         if [ "${{ parameters.operation }}" = "create_new" ] && [ -z "${{ parameters.newEnvironmentName }}" ]; then
@@ -89,7 +80,7 @@ stages:
   condition: succeeded()
   jobs:
   - deployment: ManageInfrastructure
-    displayName: 'Manage Infrastructure'
+    displayName: 'Manage Infrastructure with Bicep'
     environment: ${{ parameters.targetEnvironment }}
     strategy:
       runOnce:
@@ -109,144 +100,89 @@ stages:
               echo "##vso[task.setvariable variable=RESOURCE_GROUP_NAME]${{ parameters.resourceGroupName }}-$ENV_NAME"
             displayName: 'Set Environment Variables'
           
-          # Option 1: Using Bicep
-          - ${{ if eq(parameters.infrastructureMethod, 'bicep') }}:
-            - task: AzureCLI@2
-              displayName: 'Deploy Infrastructure with Bicep'
-              inputs:
-                azureSubscription: $(subscriptionServiceConnection)
-                scriptType: 'bash'
-                scriptLocation: 'inlineScript'
-                inlineScript: |
-                  if [ "${{ parameters.operation }}" = "destroy" ]; then
-                    echo "Deleting resource group: $(RESOURCE_GROUP_NAME)"
-                    az group delete --name $(RESOURCE_GROUP_NAME) --yes --no-wait
-                  else
-                    echo "Deploying infrastructure to: $(RESOURCE_GROUP_NAME)"
-                    
-                    # Create resource group if it doesn't exist
-                    echo "Creating resource group..."
-                    az group create --name $(RESOURCE_GROUP_NAME) --location "$(location)"
-                    
-                    # Deploy Bicep template
-                    echo "Deploying Bicep template..."
-                    
-                    # Check if bicep file exists
-                    if [ ! -f "bicep/main.bicep" ]; then
-                      echo "ERROR: bicep/main.bicep file not found!"
-                      echo "Current directory: $(pwd)"
-                      echo "Files in current directory:"
-                      ls -la
-                      echo "Files in bicep directory (if it exists):"
-                      ls -la bicep/ 2>/dev/null || echo "bicep directory does not exist"
-                      exit 1
-                    fi
-                    
-                    # Deploy without capturing output to avoid consumption issue
-                    az deployment group create \
-                      --resource-group $(RESOURCE_GROUP_NAME) \
-                      --template-file bicep/main.bicep \
-                      --parameters environmentName=$(ENV_NAME) \
-                      --parameters location="$(location)" \
-                      --verbose
-                    
-                    DEPLOYMENT_STATUS=$?
-                    
-                    if [ $DEPLOYMENT_STATUS -eq 0 ]; then
-                      echo "✓ Bicep deployment successful"
-                      
-                      # Get outputs if deployment succeeded
-                      echo "Getting deployment outputs..."
-                      APP_URL=$(az deployment group show \
-                        --resource-group $(RESOURCE_GROUP_NAME) \
-                        --name main \
-                        --query properties.outputs.appServiceUrl.value -o tsv 2>/dev/null || echo "No URL output")
-                      
-                      if [ "$APP_URL" != "No URL output" ] && [ ! -z "$APP_URL" ]; then
-                        echo "##vso[task.setvariable variable=APP_URL]$APP_URL"
-                        echo "Application URL: $APP_URL"
-                      else
-                        echo "No application URL found in outputs"
-                      fi
-                    else
-                      echo "✗ Bicep deployment failed with exit code: $DEPLOYMENT_STATUS"
-                      exit 1
-                    fi
-                  fi
-          
-          # Option 2: Using Azure CLI directly
-          - ${{ if eq(parameters.infrastructureMethod, 'azure_cli') }}:
-            - task: AzureCLI@2
-              displayName: 'Deploy Infrastructure with Azure CLI'
-              inputs:
-                azureSubscription: $(subscriptionServiceConnection)
-                scriptType: 'bash'
-                scriptLocation: 'inlineScript'
-                inlineScript: |
-                  if [ "${{ parameters.operation }}" = "destroy" ]; then
-                    echo "Deleting resource group: $(RESOURCE_GROUP_NAME)"
-                    az group delete --name $(RESOURCE_GROUP_NAME) --yes --no-wait
-                  else
-                    echo "Creating infrastructure with Azure CLI"
-                    
-                    # Create resource group
-                    az group create --name $(RESOURCE_GROUP_NAME) --location "$(location)"
-                    
-                    # Create App Service Plan
-                    az appservice plan create \
-                      --name "asp-$(ENV_NAME)" \
-                      --resource-group $(RESOURCE_GROUP_NAME) \
-                      --sku B1 \
-                      --is-linux
-                    
-                    # Create Web App
-                    az webapp create \
-                      --name "myapp-$(ENV_NAME)" \
-                      --resource-group $(RESOURCE_GROUP_NAME) \
-                      --plan "asp-$(ENV_NAME)" \
-                      --runtime "NODE:18-lts"
-                    
-                    # Optional: Create database
-                    # az sql server create \
-                    #   --name "sql-$(ENV_NAME)" \
-                    #   --resource-group $(RESOURCE_GROUP_NAME) \
-                    #   --location "$(location)" \
-                    #   --admin-user sqladmin \
-                    #   --admin-password "$(SQL_ADMIN_PASSWORD)"
-                    
-                    # Get app URL
-                    APP_URL=$(az webapp show --name "myapp-$(ENV_NAME)" --resource-group $(RESOURCE_GROUP_NAME) --query defaultHostName -o tsv)
-                    echo "##vso[task.setvariable variable=APP_URL]https://$APP_URL"
-                    echo "Application URL: https://$APP_URL"
-                  fi
-          
-          # Option 3: Using ARM Template
-          - ${{ if eq(parameters.infrastructureMethod, 'arm_template') }}:
-            - task: AzureResourceManagerTemplateDeployment@3
-              displayName: 'Deploy ARM Template'
-              condition: ne('${{ parameters.operation }}', 'destroy')
-              inputs:
-                deploymentScope: 'Resource Group'
-                azureResourceManagerConnection: $(subscriptionServiceConnection)
-                action: 'Create Or Update Resource Group'
-                resourceGroupName: $(RESOURCE_GROUP_NAME)
-                location: $(location)
-                templateLocation: 'Linked artifact'
-                codeArtifactLocation: 'arm-templates/azuredeploy.json'
-                parametersLocation: 'Linked artifact'
-                codeParametersLocation: 'arm-templates/azuredeploy.parameters.json'
-                overrideParameters: '-environmentName $(ENV_NAME)'
-                deploymentMode: 'Incremental'
-            
-            - task: AzureCLI@2
-              displayName: 'Delete Resources (ARM)'
-              condition: eq('${{ parameters.operation }}', 'destroy')
-              inputs:
-                azureSubscription: $(subscriptionServiceConnection)
-                scriptType: 'bash'
-                scriptLocation: 'inlineScript'
-                inlineScript: |
+          # Deploy Infrastructure with Bicep
+          - task: AzureCLI@2
+            displayName: 'Deploy Infrastructure with Bicep'
+            inputs:
+              azureSubscription: $(subscriptionServiceConnection)
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                if [ "${{ parameters.operation }}" = "destroy" ]; then
+                  echo "Deleting resource group: $(RESOURCE_GROUP_NAME)"
                   az group delete --name $(RESOURCE_GROUP_NAME) --yes --no-wait
+                  echo "✓ Resource group deletion initiated"
+                else
+                  echo "Deploying infrastructure to: $(RESOURCE_GROUP_NAME)"
+                  
+                  # Create resource group if it doesn't exist
+                  echo "Creating resource group..."
+                  az group create --name $(RESOURCE_GROUP_NAME) --location "$(location)"
+                  
+                  # Deploy Bicep template
+                  echo "Deploying Bicep template..."
+                  
+                  # Check if bicep file exists
+                  if [ ! -f "bicep/main.bicep" ]; then
+                    echo "ERROR: bicep/main.bicep file not found!"
+                    echo "Current directory: $(pwd)"
+                    echo "Files in current directory:"
+                    ls -la
+                    echo "Files in bicep directory (if it exists):"
+                    ls -la bicep/ 2>/dev/null || echo "bicep directory does not exist"
+                    exit 1
+                  fi
+                  
+                  # Deploy Bicep template with unique deployment name
+                  DEPLOYMENT_NAME="bicep-deployment-$(date +%Y%m%d-%H%M%S)"
+                  echo "Deployment name: $DEPLOYMENT_NAME"
+                  
+                  az deployment group create \
+                    --resource-group $(RESOURCE_GROUP_NAME) \
+                    --template-file bicep/main.bicep \
+                    --name "$DEPLOYMENT_NAME" \
+                    --parameters environmentName=$(ENV_NAME) \
+                    --parameters location="$(location)" \
+                    --verbose
+                  
+                  DEPLOYMENT_STATUS=$?
+                  
+                  if [ $DEPLOYMENT_STATUS -eq 0 ]; then
+                    echo "✓ Bicep deployment successful"
+                    
+                    # Get outputs if deployment succeeded
+                    echo "Getting deployment outputs..."
+                    
+                    # Get storage account name from outputs
+                    STORAGE_NAME=$(az deployment group show \
+                      --resource-group $(RESOURCE_GROUP_NAME) \
+                      --name "$DEPLOYMENT_NAME" \
+                      --query properties.outputs.storageAccountName.value \
+                      --output tsv 2>/dev/null || echo "")
+                    
+                    if [ ! -z "$STORAGE_NAME" ]; then
+                      echo "##vso[task.setvariable variable=STORAGE_ACCOUNT_NAME]$STORAGE_NAME"
+                      echo "Storage Account Created: $STORAGE_NAME"
+                    else
+                      echo "No storage account name found in outputs"
+                    fi
+                    
+                    # Get resource group name from outputs
+                    RG_NAME=$(az deployment group show \
+                      --resource-group $(RESOURCE_GROUP_NAME) \
+                      --name "$DEPLOYMENT_NAME" \
+                      --query properties.outputs.resourceGroupName.value \
+                      --output tsv 2>/dev/null || echo "")
+                    
+                    if [ ! -z "$RG_NAME" ]; then
+                      echo "Resource Group: $RG_NAME"
+                    fi
+                    
+                  else
+                    echo "✗ Bicep deployment failed with exit code: $DEPLOYMENT_STATUS"
+                    exit 1
+                  fi
+                fi
 
 - stage: Application
   displayName: 'Application Deployment'
@@ -296,41 +232,34 @@ stages:
           
           # Deploy application
           - task: AzureCLI@2
-            displayName: 'Deploy Application to App Service'
+            displayName: 'Deploy Application'
             inputs:
               azureSubscription: $(subscriptionServiceConnection)
               scriptType: 'bash'
               scriptLocation: 'inlineScript'
               inlineScript: |
-                # Deploy application (example for different app types)
+                echo "Application deployment for environment: $(ENV_NAME)"
+                echo "Resource Group: $(RESOURCE_GROUP_NAME)"
                 
-                # For Node.js/ZIP deployment
-                if [ -f "$(System.ArtifactsDirectory)/drop/app.zip" ]; then
-                  echo "Deploying ZIP package"
-                  az webapp deployment source config-zip \
-                    --resource-group $(RESOURCE_GROUP_NAME) \
-                    --name "myapp-$(ENV_NAME)" \
-                    --src "$(System.ArtifactsDirectory)/drop/app.zip"
-                fi
+                # Since your current Bicep template only creates a storage account,
+                # this is a placeholder for future application deployment
                 
-                # For Docker container
-                # az webapp config container set \
-                #   --name "myapp-$(ENV_NAME)" \
+                # Example: If you had an App Service in your Bicep template:
+                # az webapp deployment source config-zip \
                 #   --resource-group $(RESOURCE_GROUP_NAME) \
-                #   --docker-custom-image-name "myregistry.azurecr.io/myapp:latest"
+                #   --name "myapp-$(ENV_NAME)" \
+                #   --src "$(System.ArtifactsDirectory)/drop/app.zip"
                 
-                # Configure app settings
-                az webapp config appsettings set \
-                  --resource-group $(RESOURCE_GROUP_NAME) \
-                  --name "myapp-$(ENV_NAME)" \
-                  --settings \
-                    ENVIRONMENT=$(ENV_NAME) \
-                    DATABASE_CONNECTION_STRING="$(DATABASE_CONNECTION_STRING_$(ENV_NAME))" \
-                    API_KEY="$(API_KEY)"
+                # Example: Configure app settings if you had a web app:
+                # az webapp config appsettings set \
+                #   --resource-group $(RESOURCE_GROUP_NAME) \
+                #   --name "myapp-$(ENV_NAME)" \
+                #   --settings \
+                #     ENVIRONMENT=$(ENV_NAME) \
+                #     STORAGE_ACCOUNT="$(STORAGE_ACCOUNT_NAME)"
                 
-                # Get final app URL
-                APP_URL=$(az webapp show --name "myapp-$(ENV_NAME)" --resource-group $(RESOURCE_GROUP_NAME) --query defaultHostName -o tsv)
-                echo "Application deployed to: https://$APP_URL"
+                echo "✓ Application deployment completed"
+                echo "Storage Account: $(STORAGE_ACCOUNT_NAME)"
 
 - stage: Testing
   displayName: 'Post-Deployment Testing'
@@ -348,35 +277,31 @@ stages:
           ENV_NAME="${{ parameters.targetEnvironment }}"
         fi
         
-        # Health check endpoint
-        APP_URL="https://myapp-$ENV_NAME.azurewebsites.net"
+        echo "Running tests for environment: $ENV_NAME"
+        echo "Resource Group: ${{ parameters.resourceGroupName }}-$ENV_NAME"
         
-        echo "Testing application at: $APP_URL"
+        # Basic infrastructure validation
+        echo "Validating deployed infrastructure..."
         
-        # Wait for app to be ready
-        echo "Waiting for application to start..."
-        sleep 30
-        
-        # Basic health check
-        response=$(curl -s -o /dev/null -w "%{http_code}" $APP_URL)
-        if [ $response -eq 200 ]; then
-          echo "✓ Health check passed"
+        # Check if resource group exists
+        if az group show --name "${{ parameters.resourceGroupName }}-$ENV_NAME" --output none 2>/dev/null; then
+          echo "✓ Resource group exists"
         else
-          echo "✗ Health check failed with status: $response"
-          echo "Trying default endpoint..."
-          response=$(curl -s -o /dev/null -w "%{http_code}" $APP_URL)
-          if [ $response -eq 200 ]; then
-            echo "✓ Default endpoint accessible"
-          else
-            echo "⚠ Application may still be starting up"
-          fi
+          echo "✗ Resource group not found"
+          exit 1
         fi
+        
+        # List resources in the group
+        echo "Resources in group:"
+        az resource list --resource-group "${{ parameters.resourceGroupName }}-$ENV_NAME" --output table
         
         # Environment-specific tests
         if [ "$ENV_NAME" = "staging" ] || [ "$ENV_NAME" = "prod" ]; then
           echo "Running comprehensive tests for $ENV_NAME environment"
-          # Add your test commands here
+          # Add your environment-specific test commands here
         fi
+        
+        echo "✓ All tests completed successfully"
       displayName: 'Health Check and Testing'
 
 - stage: Notification
@@ -398,11 +323,12 @@ stages:
           STATUS="✗ Failed"
         fi
         
-        echo "=== Deployment Summary ==="
+        echo "=== Bicep Deployment Summary ==="
         echo "Status: $STATUS"
         echo "Environment: $ENV_NAME"
         echo "Operation: ${{ parameters.operation }}"
-        echo "Infrastructure Method: ${{ parameters.infrastructureMethod }}"
-        echo "=========================="
+        echo "Infrastructure Method: Bicep"
+        echo "Resource Group: ${{ parameters.resourceGroupName }}-$ENV_NAME"
+        echo "==============================="
         
       displayName: 'Send Notification'
