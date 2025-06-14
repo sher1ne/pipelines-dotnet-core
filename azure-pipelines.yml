@@ -69,7 +69,7 @@ stages:
         inlineScript: |
           echo "🔍 Analyzing changes for Development environment..."
           az deployment group what-if \
-            --resource-group "rg-myapp-dev" \
+            --resource-group "rg-myapp-test-v2" \
             --template-file $(bicepFile) \
             --parameters @$(parametersFile) environment=dev \
             --result-format FullResourcePayloads
@@ -87,7 +87,7 @@ stages:
       )
     )
   variables:
-    resourceGroupName: 'rg-myapp-dev'
+    resourceGroupName: 'rg-myapp-test-v2'
     environmentName: 'dev'
   jobs:
   - deployment: DeployToDev
