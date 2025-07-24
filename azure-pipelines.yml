@@ -1,19 +1,30 @@
-# Starter pipeline
-# Start with a minimal pipeline that you can customize to build and deploy your code.
-# Add steps that build, run tests, deploy, and more:
-# https://aka.ms/yaml
-
 trigger:
-- master
+  branches:
+    exclude:
+      - '*'
 
-pool:
-  vmImage: ubuntu-latest
+pr:
+  branches:
+    include:
+      - main
 
-steps:
-- script: echo Hello, world!
-  displayName: 'Run a one-line script'
+stages:
+- stage: Build
+  displayName: 'Build Stage'
+  condition: eq(variables['Build.Reason'], 'PullRequest')
+  jobs:
+  - job: BuildJob
+    steps:
+    - script: echo "Building PR code..."
+      displayName: 'Build PR'
 
-- script: |
-    echo Add other tasks to build, test, and deploy your project.
-    echo See https://aka.ms/yaml
-  displayName: 'Run a multi-line script'
+- stage: Deploy
+  displayName: 'Deploy Stage'
+  condition: and(succeeded(), eq(variables['Build.Reason'], 'PullRequest'))
+  dependsOn: Build
+  jobs:
+  - job: DeployJob
+    steps:
+    - script: echo "Deploying after PR approval..."
+      displayName: 'Deploy Code'
+ 
