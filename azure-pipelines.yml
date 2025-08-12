@@ -1,0 +1,60 @@
+# Starter pipeline
+# Start with a minimal pipeline that you can customize to build and deploy your code.
+# Add steps that build, run tests, deploy, and more:
+# https://aka.ms/yaml
+
+trigger:
+  branches:
+    include:
+      - main
+
+jobs:
+- job: Build
+  displayName: 'Build and Test'
+  pool:
+    vmImage: 'ubuntu-latest'
+
+  steps:
+  - task: UseDotNet@2
+    displayName: 'Install .NET SDK'
+    inputs:
+      packageType: 'sdk'
+      version: '6.x'
+      installationPath: $(Agent.ToolsDirectory)/dotnet
+
+  - checkout: self
+
+  - task: DotNetCoreCLI@2
+    displayName: 'Restore NuGet packages'
+    inputs:
+      command: 'restore'
+      projects: '**/*.csproj'
+      feedsToUse: 'config'
+      nugetConfigPath: 'NuGet.config'
+
+  - task: DotNetCoreCLI@2
+    displayName: 'Build'
+    inputs:
+      command: 'build'
+      projects: '**/*.csproj'
+      arguments: '--configuration Release'
+
+  - task: DotNetCoreCLI@2
+    displayName: 'Test'
+    inputs:
+      command: 'test'
+      projects: '**/*Tests.csproj'
+      arguments: '--configuration Release'
+      
+  - powershell: |
+      $backupDir = "D:\Backup"
+      $backupFile = "$(Build.ArtifactStagingDirectory)\$(Build.BuildId)_AzDevOpsBackup.zip"
+      $backupFileName = "$(Build.BuildId)_AzDevOpsBackup.zip"
+      $backupPath = Join-Path $backupDir $backupFileName
+      if (Test-Path $backupPath) {
+          $timestamp = Get-Date -Format "yyyyMMddHHmmss"
+          $backupFileName = "$timestamp" + "_" + $backupFileName
+          $backupPath = Join-Path $backupDir $backupFileName
+      }
+      Copy-Item -Path $backupFile -Destination $backupPath
+    displayName: 'Backup to D: Drive'
