@@ -12,7 +12,7 @@ namespace pipelines_dotnet_core.Controllers
     {
         public IActionResult Index()
         {
-            // add comment for merge test
+            // add comment for merge test 2
             return View();
         }
 
